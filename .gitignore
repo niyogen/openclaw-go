@@ -1,10 +1,9 @@
-# Build artefacts
+# Build artefacts — only the compiled binaries, not source directories
 dist/
-openclaw
-*.exe
+dist/openclaw
+dist/openclaw.exe
 
 # Local data and secrets (never commit)
-~/.openclaw-go/
 *.env
 .env.*
 
