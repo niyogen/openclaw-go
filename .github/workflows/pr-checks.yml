@@ -76,6 +76,7 @@ jobs:
           cache: true
 
       - name: Build
+        shell: bash
         run: |
           mkdir -p dist
           CGO_ENABLED=0 go build \
@@ -84,6 +85,7 @@ jobs:
             ./cmd/openclaw
 
       - name: Shell E2E
+        shell: bash
         run: bash scripts/e2e.sh
 
   # ── Gate 4: PowerShell smoke test (Windows binary) ────────────────────────
@@ -104,10 +106,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $env:CGO_ENABLED = "0"
-          go build `
-            -ldflags "-s -w -X openclaw-go/internal/gateway.Version=pr-check" `
-            -o dist\openclaw.exe `
-            .\cmd\openclaw
+          go build -ldflags "-s -w -X openclaw-go/internal/gateway.Version=pr-check" -o dist\openclaw.exe .\cmd\openclaw
 
       - name: PowerShell E2E
         shell: pwsh

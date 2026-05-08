@@ -72,10 +72,7 @@ func (r *OpenAIRunner) GenerateReply(ctx context.Context, turn Turn) (string, er
 		if strings.TrimSpace(item.Content) == "" {
 			continue
 		}
-		messages = append(messages, openAIMessage{
-			Role:    item.Role,
-			Content: item.Content,
-		})
+		messages = append(messages, openAIMessage(item))
 	}
 	messages = append(messages, openAIMessage{
 		Role:    "user",

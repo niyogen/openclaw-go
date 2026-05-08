@@ -14,14 +14,11 @@ import (
 	"time"
 )
 
-// Secret is a named secret entry.
+// Secret is a named secret entry. Value is never exposed in list responses.
 type Secret struct {
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
-	// Value is the base64-obfuscated payload – not encrypted by default.
-	// Replace with AES-GCM for production use.
-	value string
 }
 
 // Store holds named secrets with simple at-rest obfuscation.

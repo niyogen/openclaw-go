@@ -103,11 +103,8 @@ func (e *Executor) Run(ctx context.Context, opts RunOptions) RunResult {
 		tr := TurnResult{Turn: turn + 1, Content: reply}
 
 		if len(toolCalls) == 0 {
-			// Plain text reply — we're done.
-			if pendingUserMessage {
-				history = append(history, agents.HistoryMessage{Role: "user", Content: currentMessage})
-			}
-			history = append(history, agents.HistoryMessage{Role: "assistant", Content: reply})
+			// Plain text reply — we're done. We don't need to update history
+			// since we're returning immediately; just record the turn.
 			allTurns = append(allTurns, tr)
 			return RunResult{Turns: allTurns, FinalText: reply}
 		}

@@ -41,16 +41,6 @@ func (s *agentRunStore) put(id string, result runtime.RunResult) {
 	}
 }
 
-func (s *agentRunStore) get(id string) (runtime.RunResult, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.runs[id]
-	if !ok {
-		return runtime.RunResult{}, false
-	}
-	return e.result, true
-}
-
 type agentRunRequest struct {
 	SessionID string              `json:"sessionId"`
 	Message   string              `json:"message"`
@@ -178,12 +168,10 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "approved": req.Approved})
 }
 
-var runIDSeq int
 var runIDMu sync.Mutex
 
 func generateRunID() string {
 	runIDMu.Lock()
 	defer runIDMu.Unlock()
-	runIDSeq++
 	return time.Now().UTC().Format("20060102-150405.999999999") + "-run"
 }

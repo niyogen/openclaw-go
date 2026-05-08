@@ -59,6 +59,7 @@ jobs:
           cache: true
 
       - name: Build
+        shell: bash
         run: |
           VERSION=$(cat VERSION 2>/dev/null || echo dev)
           mkdir -p dist
