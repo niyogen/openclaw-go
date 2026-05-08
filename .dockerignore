@@ -1,0 +1,23 @@
+# --- build artefacts ---
+openclaw
+*.exe
+dist/
+
+# --- secrets / local config that should never enter an image ---
+*.env
+.env.*
+~/.openclaw-go/
+
+# --- go cache ---
+vendor/
+
+# --- editor / OS noise ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- git ---
+.git/
+.gitignore

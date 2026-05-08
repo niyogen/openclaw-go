@@ -1,0 +1,54 @@
+name: Release
+
+# Triggered only when a version tag (e.g. v1.2.3) is pushed.
+# Never runs on PRs — releases are gated behind merging to main.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Determine version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build cross-platform binaries
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p dist/release
+          for PAIR in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            OS=$(echo $PAIR | cut -d/ -f1)
+            ARCH=$(echo $PAIR | cut -d/ -f2)
+            OUT=dist/release/openclaw-${VERSION}-${OS}-${ARCH}
+            [ "$OS" = "windows" ] && OUT=${OUT}.exe
+            echo "Building $OS/$ARCH → $OUT"
+            CGO_ENABLED=0 GOOS=$OS GOARCH=$ARCH go build \
+              -trimpath \
+              -ldflags "-s -w -X openclaw-go/internal/gateway.Version=${VERSION}" \
+              -o "$OUT" \
+              ./cmd/openclaw
+          done
+          ls -lh dist/release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/release/*
+          generate_release_notes: true

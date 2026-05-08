@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Unit tests (required) ──────────────────────────────────────────────────
+  test:
+    name: Test (${{ matrix.os }} / Go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go: ["1.22", "1.24"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (Linux / macOS — with race detector)
+        if: runner.os != 'Windows'
+        run: go test -count=1 -timeout 60s -race ./...
+
+      - name: Test (Windows — race requires CGO, skip)
+        if: runner.os == 'Windows'
+        run: go test -count=1 -timeout 60s ./...
+
+  # ── Build binary + upload as PR artifact (required on PRs) ────────────────
+  build:
+    name: Build binary
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Build
+        run: |
+          VERSION=$(cat VERSION 2>/dev/null || echo dev)
+          mkdir -p dist
+          CGO_ENABLED=0 go build \
+            -trimpath \
+            -ldflags "-s -w -X openclaw-go/internal/gateway.Version=${VERSION}" \
+            -o dist/openclaw \
+            ./cmd/openclaw
+          echo "Binary size: $(du -sh dist/openclaw | cut -f1)"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-linux-amd64-${{ github.sha }}
+          path: dist/openclaw
+          retention-days: 7
+
+  # ── Lint (required on PRs) ────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout 5m

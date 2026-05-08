@@ -1,0 +1,16 @@
+# Build artefacts
+dist/
+openclaw
+*.exe
+
+# Local data and secrets (never commit)
+~/.openclaw-go/
+*.env
+.env.*
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

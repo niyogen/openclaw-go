@@ -1,0 +1,183 @@
+name: PR checks
+
+# This workflow is the single required status check you protect main with.
+# It collects all mandatory gates and posts one unified result on a PR.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Gate 1: unit tests pass on all three platforms ────────────────────────
+  unit-tests:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Tests (Linux/macOS with -race)
+        if: runner.os != 'Windows'
+        run: go test -count=1 -timeout 60s -race ./...
+
+      - name: Tests (Windows without -race)
+        if: runner.os == 'Windows'
+        run: go test -count=1 -timeout 60s ./...
+
+  # ── Gate 2: in-process Go E2E suite ──────────────────────────────────────
+  e2e-go:
+    name: Go E2E (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Go E2E tests
+        run: go test ./e2e/... -v -count=1 -timeout 90s
+
+  # ── Gate 3: shell smoke test (Linux binary) ───────────────────────────────
+  e2e-shell:
+    name: Shell E2E smoke (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Build
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 go build \
+            -ldflags "-s -w -X openclaw-go/internal/gateway.Version=pr-check" \
+            -o dist/openclaw \
+            ./cmd/openclaw
+
+      - name: Shell E2E
+        run: bash scripts/e2e.sh
+
+  # ── Gate 4: PowerShell smoke test (Windows binary) ────────────────────────
+  e2e-ps:
+    name: PowerShell E2E smoke (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Build Windows binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $env:CGO_ENABLED = "0"
+          go build `
+            -ldflags "-s -w -X openclaw-go/internal/gateway.Version=pr-check" `
+            -o dist\openclaw.exe `
+            .\cmd\openclaw
+
+      - name: PowerShell E2E
+        shell: pwsh
+        run: .\scripts\e2e.ps1 -SkipBuild
+
+  # ── Gate 5: Docker build validates (no push) ──────────────────────────────
+  docker-build:
+    name: Docker build (PR lint)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          tags: openclaw-go:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Gate 6: lint ──────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout 5m
+
+  # ── Summary: single required check ────────────────────────────────────────
+  # Add "pr-checks / all-checks-passed" as the ONE required status check
+  # in your branch protection rule.  All jobs above must succeed first.
+  all-checks-passed:
+    name: All checks passed
+    runs-on: ubuntu-latest
+    needs:
+      - unit-tests
+      - e2e-go
+      - e2e-shell
+      - e2e-ps
+      - docker-build
+      - lint
+    if: always()
+
+    steps:
+      - name: Evaluate results
+        run: |
+          results='${{ toJSON(needs) }}'
+          echo "Job results: $results"
+          if echo "$results" | grep -q '"result": "failure"'; then
+            echo "One or more required checks failed."
+            exit 1
+          fi
+          if echo "$results" | grep -q '"result": "cancelled"'; then
+            echo "One or more checks were cancelled."
+            exit 1
+          fi
+          echo "All checks passed."
