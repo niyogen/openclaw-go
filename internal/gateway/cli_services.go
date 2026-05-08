@@ -7,8 +7,6 @@ import (
 
 	"openclaw-go/internal/cronstore"
 	"openclaw-go/internal/hookstore"
-	"openclaw-go/internal/logstore"
-	"openclaw-go/internal/secretstore"
 )
 
 // ------------------------------------------------------------------
@@ -295,9 +293,3 @@ func (s *Server) rpcSecretsDelete(params json.RawMessage) (any, *rpcError) {
 	}
 	return map[string]any{"ok": true, "deleted": p.Name}, nil
 }
-
-// Unused field annotations suppress "declared and not used" linter for store types.
-var _ *logstore.Store
-var _ *cronstore.Store
-var _ *hookstore.Store
-var _ *secretstore.Store
