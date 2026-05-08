@@ -67,17 +67,7 @@ func (r *OpenAIRunner) GenerateReply(ctx context.Context, turn Turn) (string, er
 		return "", fmt.Errorf("openai api key is empty")
 	}
 
-	messages := make([]openAIMessage, 0, len(turn.History)+1)
-	for _, item := range turn.History {
-		if strings.TrimSpace(item.Content) == "" {
-			continue
-		}
-		messages = append(messages, openAIMessage(item))
-	}
-	messages = append(messages, openAIMessage{
-		Role:    "user",
-		Content: turn.Message,
-	})
+	messages := buildMessages(turn)
 	reqBody := openAIChatRequest{
 		Model:    r.model,
 		Messages: messages,

@@ -21,6 +21,7 @@ import (
 	"openclaw-go/internal/config"
 	"openclaw-go/internal/gateway"
 	"openclaw-go/internal/plugins"
+	"openclaw-go/internal/sandbox"
 	"openclaw-go/internal/sessions"
 )
 
@@ -519,8 +520,34 @@ func runGateway(cfg config.Config) error {
 			cfg.Channels.WhatsApp.ToNumber,
 		))
 	}
+	if cfg.Channels.Line.Enabled {
+		channelRouter.Register(channels.NewLineChannel(
+			cfg.Channels.Line.ChannelToken,
+			cfg.Channels.Line.ChannelSecret,
+		))
+	}
+	if cfg.Channels.Nostr.Enabled {
+		channelRouter.Register(channels.NewNostrChannel(
+			cfg.Channels.Nostr.RelayURL,
+			cfg.Channels.Nostr.Pubkey,
+		))
+	}
 	registry := plugins.NewRegistry()
 	registry.Register(plugins.NewMetaPlugin(registry))
+
+	// Load external plugins from configured directory.
+	pluginsDir := cfg.Gateway.PluginsDir
+	if pluginsDir == "" {
+		pluginsDir = filepath.Join(home, ".openclaw-go", "plugins")
+	}
+	loader := plugins.NewLoader(pluginsDir)
+	if externalPlugins, err := loader.Load(); err == nil {
+		for _, ep := range externalPlugins {
+			registry.Register(ep)
+			fmt.Printf("loaded plugin: %s\n", ep.Name())
+		}
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -534,6 +561,18 @@ func runGateway(cfg config.Config) error {
 		channelRouter,
 		registry,
 		filepath.Join(home, ".openclaw-go"),
+	)
+
+	// Wire real sandbox into gateway tools so sandbox.run tool uses Docker.
+	gateway.SetSandboxFuncs(
+		func(ctx context.Context, script string, _ interface{}) (*gateway.SandboxResult, error) {
+			r, err := sandbox.RunScript(ctx, script, sandbox.DefaultOptions())
+			if err != nil {
+				return nil, err
+			}
+			return &gateway.SandboxResult{Stdout: r.Stdout, Stderr: r.Stderr, ExitCode: r.ExitCode}, nil
+		},
+		sandbox.IsAvailable,
 	)
 
 	if cfg.Channels.Telegram.Enabled {
@@ -600,6 +639,18 @@ func runGateway(cfg config.Config) error {
 			channels.BuildWhatsAppWebhookHandler(
 				cfg.Channels.WhatsApp.VerifyToken,
 				cfg.Channels.WhatsApp.AppSecret,
+				func(inboundCtx context.Context, inbound channels.InboundMessage) error {
+					_, err := server.HandleInbound(inboundCtx, inbound)
+					return err
+				},
+			),
+		)
+	}
+	if cfg.Channels.Line.Enabled {
+		server.HandleFunc(
+			cfg.Channels.Line.WebhookPath,
+			channels.BuildLineWebhookHandler(
+				cfg.Channels.Line.ChannelSecret,
 				func(inboundCtx context.Context, inbound channels.InboundMessage) error {
 					_, err := server.HandleInbound(inboundCtx, inbound)
 					return err

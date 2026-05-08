@@ -64,8 +64,9 @@ type v1ChatMessage struct {
 	Content string `json:"content"`
 }
 
-// handleV1ChatCompletions proxies through the configured runner and returns
-// a response shaped like an OpenAI chat completion object.
+// handleV1ChatCompletions supports both standard (JSON) and streaming (SSE)
+// OpenAI chat completion requests.  Set "stream": true in the request body
+// to receive Server-Sent Events in the same format as the OpenAI API.
 func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -81,20 +82,35 @@ func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Build Turn from messages: last message is the prompt, rest is history.
-	var history []agents.HistoryMessage
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = "openclaw-go"
+	}
+
 	lastMsg := req.Messages[len(req.Messages)-1]
+	var history []agents.HistoryMessage
 	for _, m := range req.Messages[:len(req.Messages)-1] {
 		history = append(history, agents.HistoryMessage{Role: m.Role, Content: m.Content})
 	}
+	turn := agents.Turn{Message: lastMsg.Content, History: history}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	reply, err := s.runner.GenerateReply(ctx, agents.Turn{
-		Message: lastMsg.Content,
-		History: history,
-	})
+	if req.Stream {
+		s.handleV1ChatStream(w, ctx, model, lastMsg.Content, turn)
+		return
+	}
+	s.handleV1ChatBlocking(w, ctx, model, lastMsg.Content, turn)
+}
+
+func (s *Server) handleV1ChatBlocking(
+	w http.ResponseWriter,
+	ctx context.Context,
+	model, prompt string,
+	turn agents.Turn,
+) {
+	reply, err := s.runner.GenerateReply(ctx, turn)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error": map[string]any{
@@ -105,31 +121,93 @@ func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request)
 		})
 		return
 	}
-
-	model := strings.TrimSpace(req.Model)
-	if model == "" {
-		model = "openclaw-go"
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]any{
-			{
-				"index": 0,
-				"message": map[string]string{
-					"role":    "assistant",
-					"content": reply,
-				},
-				"finish_reason": "stop",
-			},
-		},
+		"choices": []map[string]any{{
+			"index":         0,
+			"message":       map[string]string{"role": "assistant", "content": reply},
+			"finish_reason": "stop",
+		}},
 		"usage": map[string]int{
-			"prompt_tokens":     len(strings.Fields(lastMsg.Content)),
+			"prompt_tokens":     len(strings.Fields(prompt)),
 			"completion_tokens": len(strings.Fields(reply)),
-			"total_tokens":      len(strings.Fields(lastMsg.Content)) + len(strings.Fields(reply)),
+			"total_tokens":      len(strings.Fields(prompt)) + len(strings.Fields(reply)),
 		},
 	})
+}
+
+func (s *Server) handleV1ChatStream(
+	w http.ResponseWriter,
+	ctx context.Context,
+	model, prompt string,
+	turn agents.Turn,
+) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming not supported"})
+		return
+	}
+
+	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	created := time.Now().Unix()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering
+	w.WriteHeader(http.StatusOK)
+
+	writeDelta := func(delta string, finishReason *string) {
+		choice := map[string]any{
+			"index": 0,
+			"delta": map[string]string{"role": "assistant", "content": delta},
+		}
+		if finishReason != nil {
+			choice["finish_reason"] = *finishReason
+			choice["delta"] = map[string]string{}
+		}
+		chunk := map[string]any{
+			"id":      id,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   model,
+			"choices": []any{choice},
+		}
+		raw, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", raw)
+		flusher.Flush()
+	}
+
+	// Send the role header chunk first.
+	writeDelta("", nil)
+
+	out := make(chan agents.StreamChunk, 32)
+	go func() {
+		defer close(out)
+		agents.Stream(ctx, s.runner, turn, out)
+	}()
+
+	for chunk := range out {
+		if chunk.Err != nil {
+			errMsg := map[string]any{
+				"error": map[string]any{"message": chunk.Err.Error(), "type": "server_error"},
+			}
+			raw, _ := json.Marshal(errMsg)
+			fmt.Fprintf(w, "data: %s\n\n", raw)
+			flusher.Flush()
+			return
+		}
+		if chunk.Done {
+			stop := "stop"
+			writeDelta("", &stop)
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+		writeDelta(chunk.Delta, nil)
+	}
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }

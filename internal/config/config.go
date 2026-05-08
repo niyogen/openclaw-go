@@ -13,6 +13,7 @@ type GatewayConfig struct {
 	Port           int      `json:"port"`
 	AuthToken      string   `json:"authToken"`
 	AllowedOrigins []string `json:"allowedOrigins"`
+	PluginsDir     string   `json:"pluginsDir"` // directory to load external plugins from
 }
 
 type AgentConfig struct {
@@ -88,6 +89,19 @@ type WhatsAppChannelConfig struct {
 	AppSecret     string `json:"appSecret"`
 }
 
+type LineChannelConfig struct {
+	Enabled       bool   `json:"enabled"`
+	ChannelToken  string `json:"channelToken"`
+	ChannelSecret string `json:"channelSecret"`
+	WebhookPath   string `json:"webhookPath"`
+}
+
+type NostrChannelConfig struct {
+	Enabled  bool   `json:"enabled"`
+	RelayURL string `json:"relayUrl"`
+	Pubkey   string `json:"pubkey"`
+}
+
 type ChannelsConfig struct {
 	Webhook  WebhookChannelConfig  `json:"webhook"`
 	Telegram TelegramChannelConfig `json:"telegram"`
@@ -95,6 +109,8 @@ type ChannelsConfig struct {
 	Discord  DiscordChannelConfig  `json:"discord"`
 	Teams    TeamsChannelConfig    `json:"teams"`
 	WhatsApp WhatsAppChannelConfig `json:"whatsapp"`
+	Line     LineChannelConfig     `json:"line"`
+	Nostr    NostrChannelConfig    `json:"nostr"`
 }
 
 type Config struct {
@@ -155,6 +171,13 @@ func Default() Config {
 				InboundMode: "webhook",
 				WebhookPath: "/webhooks/whatsapp",
 			},
+			Line: LineChannelConfig{
+				Enabled:     false,
+				WebhookPath: "/webhooks/line",
+			},
+			Nostr: NostrChannelConfig{
+				Enabled: false,
+			},
 		},
 	}
 }
@@ -198,6 +221,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Gateway.AuthToken == "" {
 		cfg.Gateway.AuthToken = os.Getenv("OPENCLAW_GATEWAY_AUTH_TOKEN")
+	}
+	if cfg.Gateway.PluginsDir == "" {
+		cfg.Gateway.PluginsDir = os.Getenv("OPENCLAW_PLUGINS_DIR")
 	}
 	if len(cfg.Gateway.AllowedOrigins) == 0 {
 		origins := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_ALLOWED_ORIGINS"))
@@ -319,6 +345,21 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Channels.WhatsApp.AppSecret == "" {
 		cfg.Channels.WhatsApp.AppSecret = os.Getenv("WHATSAPP_APP_SECRET")
+	}
+	if cfg.Channels.Line.ChannelToken == "" {
+		cfg.Channels.Line.ChannelToken = os.Getenv("LINE_CHANNEL_TOKEN")
+	}
+	if cfg.Channels.Line.ChannelSecret == "" {
+		cfg.Channels.Line.ChannelSecret = os.Getenv("LINE_CHANNEL_SECRET")
+	}
+	if cfg.Channels.Line.WebhookPath == "" {
+		cfg.Channels.Line.WebhookPath = "/webhooks/line"
+	}
+	if cfg.Channels.Nostr.RelayURL == "" {
+		cfg.Channels.Nostr.RelayURL = os.Getenv("NOSTR_RELAY_URL")
+	}
+	if cfg.Channels.Nostr.Pubkey == "" {
+		cfg.Channels.Nostr.Pubkey = os.Getenv("NOSTR_PUBKEY")
 	}
 	return cfg, nil
 }

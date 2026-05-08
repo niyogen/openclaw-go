@@ -39,6 +39,7 @@ type Server struct {
 	hooks          *hookstore.Store
 	secrets        *secretstore.Store
 	rateLimiter    *RateLimiter
+	bus            *EventBus
 	mux            *http.ServeMux
 }
 
@@ -69,7 +70,8 @@ func New(
 		s.route = channels.NewRouter()
 	}
 	s.approvals = runtime.NewApprovalQueue()
-	s.rateLimiter = NewRateLimiter(120, time.Minute) // 120 req/min per IP
+	s.rateLimiter = NewRateLimiter(120, time.Minute)
+	s.bus = NewEventBus()
 	s.logs, _ = logstore.New(dataDir + "/logs.json")
 	s.cron, _ = cronstore.New(dataDir + "/cron.json")
 	s.hooks, _ = hookstore.New(dataDir + "/hooks.json")
@@ -228,6 +230,7 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.bus.Publish(GatewayEvent{Type: EventSessionKilled, SessionID: id})
 	s.logs.Append(logstore.LevelInfo, "sessions", "session killed: "+id, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "killed": id})
 }
@@ -247,6 +250,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
 	}
+	s.bus.Publish(GatewayEvent{Type: EventSessionDeleted, SessionID: id})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id})
 }
 
@@ -355,6 +359,7 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 		s.hooks.Emit(hookstore.EventSessionCreated, map[string]any{
 			"sessionId": req.SessionID, "channel": req.Channel,
 		})
+		s.bus.Publish(GatewayEvent{Type: EventSessionCreated, SessionID: req.SessionID})
 		s.logs.Append(logstore.LevelInfo, "sessions", "session created: "+req.SessionID, nil)
 	}
 	if err := s.store.AppendMessage(req.SessionID, sessions.Message{
@@ -366,6 +371,11 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 	}
 	s.hooks.Emit(hookstore.EventMessageReceived, map[string]any{
 		"sessionId": req.SessionID, "channel": req.Channel, "message": req.Message,
+	})
+	s.bus.Publish(GatewayEvent{
+		Type:      EventSessionMessage,
+		SessionID: req.SessionID,
+		Data:      map[string]any{"role": "user", "content": req.Message},
 	})
 	historyMessages := []agents.HistoryMessage{}
 	if existing, ok := s.store.Get(req.SessionID); ok {
@@ -398,6 +408,16 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 	})
 	s.hooks.Emit(hookstore.EventMessageSent, map[string]any{
 		"sessionId": req.SessionID, "channel": req.Channel, "reply": reply,
+	})
+	s.bus.Publish(GatewayEvent{
+		Type:      EventSessionMessage,
+		SessionID: req.SessionID,
+		Data:      map[string]any{"role": "assistant", "content": reply},
+	})
+	s.bus.Publish(GatewayEvent{
+		Type:      EventAgentReply,
+		SessionID: req.SessionID,
+		Data:      map[string]any{"reply": reply},
 	})
 	s.logs.Append(logstore.LevelInfo, "message", "reply sent for "+req.SessionID, nil)
 	return reply, nil
@@ -622,6 +642,33 @@ func (s *Server) dispatchRPC(
 			return nil, &rpcError{Code: -32001, Message: err.Error()}
 		}
 		return map[string]any{"ok": true, "id": p.ID, "approved": p.Approved}, nil
+	case "sessions.subscribe":
+		// Over JSON-RPC / REST, return recent events from the bus (poll-style).
+		// For real push, use the WS frame type "sessions.subscribe" instead.
+		var p sessionIDParams
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		evCh, unsub := s.bus.Subscribe(p.SessionID)
+		defer unsub()
+		// Collect up to 100ms worth of buffered events.
+		deadline := time.After(100 * time.Millisecond)
+		var events []GatewayEvent
+		for {
+			select {
+			case ev, ok := <-evCh:
+				if !ok {
+					goto done
+				}
+				events = append(events, ev)
+			case <-deadline:
+				goto done
+			case <-ctx.Done():
+				goto done
+			}
+		}
+	done:
+		return map[string]any{"events": events}, nil
 	case "logs.list":
 		return s.rpcLogs(params)
 	case "cron.list":
@@ -830,6 +877,23 @@ func (s *Server) dispatchWSFrame(ctx context.Context, frame wsFrame, send chan<-
 	case "health":
 		now := time.Now().UTC()
 		send <- wsFrame{Type: "health", Data: s.gatewayStatus(), Time: &now}
+
+	case "sessions.subscribe":
+		// Subscribe to events for a specific session (or all if sessionId is empty).
+		sessionFilter := strings.TrimSpace(frame.SessionID)
+		evCh, unsub := s.bus.Subscribe(sessionFilter)
+		go func() {
+			defer unsub()
+			for ev := range evCh {
+				now := time.Now().UTC()
+				select {
+				case send <- wsFrame{Type: "event", ID: frame.ID, Data: ev, Time: &now}:
+				default:
+				}
+			}
+		}()
+		now := time.Now().UTC()
+		send <- wsFrame{Type: "subscribed", ID: frame.ID, SessionID: sessionFilter, Time: &now}
 
 	default:
 		// Unknown frame type — echo it back so clients can debug.
