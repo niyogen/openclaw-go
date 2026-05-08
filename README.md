@@ -1,4 +1,7 @@
-# OpenClaw-Go (from-scratch port, MVP)
+# OpenClaw-Go
+
+> A from-scratch Go implementation of the OpenClaw agent platform.
+> © 2026 Prageeth Mahendra Gunathilaka — MIT License
 
 This repository is a from-scratch Go implementation inspired by OpenClaw's core architecture:
 
