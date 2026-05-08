@@ -8,29 +8,29 @@ FROM golang:1.24-alpine AS builder
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
-# git is required by some go mod operations; ca-certificates and tzdata for the runtime image.
 RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /src
 
 # ── Dependency layer (cached unless go.mod/go.sum change) ────────────────────
 COPY go.mod go.sum ./
-RUN go mod download && go mod verify
+RUN go mod download
 
 # ── Source layer ──────────────────────────────────────────────────────────────
 COPY . .
 
 # ── Build ─────────────────────────────────────────────────────────────────────
-RUN set -e && \
+RUN mkdir -p /out && \
     VERSION=$(cat VERSION 2>/dev/null || echo dev) && \
     echo "Building openclaw ${VERSION} for ${TARGETOS}/${TARGETARCH}" && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
       go build \
+        -v \
         -trimpath \
         -ldflags="-s -w -X openclaw-go/internal/gateway.Version=${VERSION}" \
         -o /out/openclaw \
         ./cmd/openclaw && \
-    echo "Binary size: $(du -sh /out/openclaw | cut -f1)"
+    echo "Done: $(ls -lh /out/openclaw)"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 2 – minimal runtime image

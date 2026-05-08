@@ -1,9 +1,12 @@
-﻿name: PR checks
+name: PR checks
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [main, master]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -80,10 +83,11 @@ jobs:
       - name: Build
         run: |
           mkdir -p dist
-          CGO_ENABLED=0 go build \
+          CGO_ENABLED=0 go build -v \
             -ldflags "-s -w -X openclaw-go/internal/gateway.Version=pr-check" \
             -o dist/openclaw \
             ./cmd/openclaw
+          echo "Built: $(ls -lh dist/openclaw | awk '{print $5}')"
 
       - name: Shell E2E
         run: bash scripts/e2e.sh
@@ -109,7 +113,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $env:CGO_ENABLED = "0"
-          go build -ldflags "-s -w -X openclaw-go/internal/gateway.Version=pr-check" -o dist\openclaw.exe .\cmd\openclaw
+          go build -v -ldflags "-s -w -X openclaw-go/internal/gateway.Version=pr-check" -o dist\openclaw.exe .\cmd\openclaw
 
       - name: PowerShell E2E
         shell: pwsh
