@@ -1,4 +1,4 @@
-name: PR checks
+﻿name: PR checks
 
 on:
   pull_request:
@@ -114,6 +114,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $env:CGO_ENABLED = "0"
           go build -v -ldflags "-s -w -X openclaw-go/internal/gateway.Version=pr-check" -o dist\openclaw.exe .\cmd\openclaw
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "Built: $((Get-Item dist\openclaw.exe).Length) bytes"
 
       - name: PowerShell E2E
         shell: pwsh

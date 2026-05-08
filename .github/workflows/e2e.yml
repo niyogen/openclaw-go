@@ -1,4 +1,4 @@
-name: E2E
+﻿name: E2E
 
 on:
   push:
@@ -89,6 +89,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $env:CGO_ENABLED = "0"
           go build -v -ldflags "-s -w -X openclaw-go/internal/gateway.Version=e2e-ci" -o dist\openclaw.exe .\cmd\openclaw
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host "Built: $((Get-Item dist\openclaw.exe).Length) bytes"
 
       - name: Run PowerShell E2E
