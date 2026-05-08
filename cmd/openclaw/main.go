@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -393,6 +394,174 @@ func main() {
 			fmt.Fprintf(os.Stderr, "plugins error: %v\n", err)
 			os.Exit(1)
 		}
+	case "usage":
+		if err := rpc(baseURL+"/rpc", "usage.stats", map[string]any{}); err != nil {
+			fmt.Fprintf(os.Stderr, "usage error: %v\n", err)
+			os.Exit(1)
+		}
+	case "channels":
+		if err := rpc(baseURL+"/rpc", "channels.list", map[string]any{}); err != nil {
+			fmt.Fprintf(os.Stderr, "channels error: %v\n", err)
+			os.Exit(1)
+		}
+	case "nodes":
+		raw, _ := json.MarshalIndent(cfg.Nodes, "", "  ")
+		fmt.Println(string(raw))
+	case "skills":
+		raw, _ := json.MarshalIndent(cfg.Skills, "", "  ")
+		fmt.Println(string(raw))
+	case "mcp":
+		raw, _ := json.MarshalIndent(cfg.MCP, "", "  ")
+		fmt.Println(string(raw))
+	case "memory":
+		raw, _ := json.MarshalIndent(cfg.Memory, "", "  ")
+		fmt.Println(string(raw))
+	case "health":
+		// Liveness probe.
+		if err := get(baseURL + "/health"); err != nil {
+			fmt.Fprintf(os.Stderr, "health error: %v\n", err)
+			os.Exit(1)
+		}
+	case "ready":
+		// Readiness probe.
+		if err := get(baseURL + "/ready"); err != nil {
+			fmt.Fprintf(os.Stderr, "ready error: %v\n", err)
+			os.Exit(1)
+		}
+	case "stop":
+		// Graceful gateway shutdown via RPC.
+		if err := rpc(baseURL+"/rpc", "gateway.stop", map[string]any{}); err != nil {
+			fmt.Fprintf(os.Stderr, "stop error: %v\n", err)
+			os.Exit(1)
+		}
+	case "tools":
+		if len(os.Args) < 3 {
+			if err := get(baseURL + "/tools"); err != nil {
+				fmt.Fprintf(os.Stderr, "tools error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			switch os.Args[2] {
+			case "list":
+				if err := get(baseURL + "/tools"); err != nil {
+					fmt.Fprintf(os.Stderr, "tools list error: %v\n", err)
+					os.Exit(1)
+				}
+			case "invoke":
+				if len(os.Args) < 4 {
+					fmt.Println("usage: openclaw tools invoke <name> [args...]")
+					os.Exit(2)
+				}
+				params, err := parseRPCParams("tools.invoke", os.Args[3:])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "tools invoke params error: %v\n", err)
+					os.Exit(2)
+				}
+				if err := rpc(baseURL+"/rpc", "tools.invoke", params); err != nil {
+					fmt.Fprintf(os.Stderr, "tools invoke error: %v\n", err)
+					os.Exit(1)
+				}
+			}
+		}
+	case "sandbox":
+		if len(os.Args) < 3 {
+			fmt.Println("usage: openclaw sandbox run <script>")
+			os.Exit(2)
+		}
+		switch os.Args[2] {
+		case "run":
+			if len(os.Args) < 4 {
+				fmt.Println("usage: openclaw sandbox run <script>")
+				os.Exit(2)
+			}
+			script := strings.Join(os.Args[3:], " ")
+			if err := rpc(baseURL+"/rpc", "tools.invoke", map[string]any{
+				"name":      "sandbox.run",
+				"arguments": map[string]any{"script": script},
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "sandbox run error: %v\n", err)
+				os.Exit(1)
+			}
+		case "available":
+			if err := rpc(baseURL+"/rpc", "tools.invoke", map[string]any{
+				"name": "sandbox.available", "arguments": map[string]any{},
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "sandbox available error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	case "chat", "tui", "terminal":
+		sessionID := "chat-" + time.Now().Format("20060102-150405")
+		if len(os.Args) >= 3 {
+			sessionID = os.Args[2]
+		}
+		fmt.Printf("OpenClaw-Go chat (session: %s) — type 'exit' to quit\n", sessionID)
+		scanner := bufio.NewScanner(os.Stdin)
+		for {
+			fmt.Print("> ")
+			if !scanner.Scan() {
+				break
+			}
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			if line == "exit" || line == "quit" {
+				break
+			}
+			// Use streaming endpoint for live output.
+			streamResp, err := func() (*http.Response, error) {
+				return post2(baseURL+"/v1/chat/completions", map[string]any{
+					"model":    "openclaw-go",
+					"stream":   true,
+					"messages": []map[string]string{{"role": "user", "content": line}},
+				})
+			}()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				continue
+			}
+			chatScanner := bufio.NewScanner(streamResp.Body)
+			fmt.Print("Assistant: ")
+			for chatScanner.Scan() {
+				l := chatScanner.Text()
+				if !strings.HasPrefix(l, "data: ") {
+					continue
+				}
+				data := strings.TrimPrefix(l, "data: ")
+				if data == "[DONE]" {
+					break
+				}
+				var chunk struct {
+					Choices []struct {
+						Delta struct{ Content string } `json:"delta"`
+					} `json:"choices"`
+				}
+				if json.Unmarshal([]byte(data), &chunk) == nil && len(chunk.Choices) > 0 {
+					fmt.Print(chunk.Choices[0].Delta.Content)
+				}
+			}
+			streamResp.Body.Close()
+			fmt.Println()
+		}
+	case "version":
+		if err := get(baseURL + "/health"); err != nil {
+			// Gateway not running — just print compiled version placeholder.
+			fmt.Println("openclaw-go version: (gateway not running)")
+		}
+	case "embeddings":
+		if len(os.Args) < 3 {
+			fmt.Println("usage: openclaw embeddings <text>")
+			os.Exit(2)
+		}
+		texts := os.Args[2:]
+		if err := post(baseURL+"/v1/embeddings", map[string]any{
+			"model": "text-embedding-ada-002",
+			"input": texts,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "embeddings error: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		printUsage()
 		os.Exit(2)
@@ -455,13 +624,25 @@ func printUsage() {
 	fmt.Println("  openclaw models [<provider>]")
 	fmt.Println("  openclaw capability [<provider>]")
 	fmt.Println("  openclaw infer <message>")
+	fmt.Println("  openclaw embeddings <text...>")
+	fmt.Println("  openclaw tools [list|invoke <name> [args]]")
+	fmt.Println("  openclaw sandbox [run <script>|available]")
 	fmt.Println("  openclaw gateway [run]")
+	fmt.Println("  openclaw stop")
 	fmt.Println("  openclaw status")
+	fmt.Println("  openclaw health")
+	fmt.Println("  openclaw ready")
+	fmt.Println("  openclaw version")
 	fmt.Println("  openclaw doctor")
+	fmt.Println("  openclaw usage")
+	fmt.Println("  openclaw channels")
+	fmt.Println("  openclaw nodes")
+	fmt.Println("  openclaw skills")
+	fmt.Println("  openclaw mcp")
+	fmt.Println("  openclaw memory")
 	fmt.Println("  openclaw rpc <method> [args...]")
 	fmt.Println("  openclaw sessions")
-	fmt.Println("  openclaw session get <id>")
-	fmt.Println("  openclaw session delete <id>")
+	fmt.Println("  openclaw session get|history|kill|delete|patch|compact|stats <id>")
 	fmt.Println("  openclaw message send <session-id> <message>")
 	fmt.Println("  openclaw agent <message>")
 }
@@ -544,6 +725,10 @@ func runGateway(cfg config.Config) error {
 	if externalPlugins, err := loader.Load(); err == nil {
 		for _, ep := range externalPlugins {
 			registry.Register(ep)
+			// Register each tool declared in the plugin manifest.
+			for _, tool := range ep.Tools() {
+				fmt.Printf("loaded plugin %s — tool: %s\n", ep.Name(), tool.Name)
+			}
 			fmt.Printf("loaded plugin: %s\n", ep.Name())
 		}
 	}
@@ -563,6 +748,9 @@ func runGateway(cfg config.Config) error {
 		filepath.Join(home, ".openclaw-go"),
 	)
 
+	// Configure additional auth modes (password + trusted proxies).
+	server.SetAuth(cfg.Gateway.Password, cfg.Gateway.TrustedProxies)
+
 	// Wire real sandbox into gateway tools so sandbox.run tool uses Docker.
 	gateway.SetSandboxFuncs(
 		func(ctx context.Context, script string, _ interface{}) (*gateway.SandboxResult, error) {
@@ -574,6 +762,15 @@ func runGateway(cfg config.Config) error {
 		},
 		sandbox.IsAvailable,
 	)
+
+	// Register tool endpoints from external plugin manifests.
+	if externalPlugins2, err := loader.Load(); err == nil {
+		for _, ep := range externalPlugins2 {
+			for _, tool := range ep.Tools() {
+				server.RegisterPluginTools(tool.Name, tool.Description, tool.Endpoint)
+			}
+		}
+	}
 
 	if cfg.Channels.Telegram.Enabled {
 		inboundHandler := func(inboundCtx context.Context, inbound channels.InboundMessage) error {
@@ -657,6 +854,30 @@ func runGateway(cfg config.Config) error {
 				},
 			),
 		)
+	}
+
+	// Nostr inbound: start relay subscription if enabled.
+	if cfg.Channels.Nostr.Enabled && strings.TrimSpace(cfg.Channels.Nostr.RelayURL) != "" {
+		go func() {
+			for {
+				err := channels.NostrRelaySubscription(ctx, cfg.Channels.Nostr.RelayURL, cfg.Channels.Nostr.Pubkey,
+					func(relayCtx context.Context, inbound channels.InboundMessage) error {
+						_, err := server.HandleInbound(relayCtx, inbound)
+						return err
+					})
+				if ctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					fmt.Printf("nostr relay error (retrying in 10s): %v\n", err)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(10 * time.Second):
+					}
+				}
+			}
+		}()
 	}
 
 	fmt.Printf("OpenClaw-Go gateway listening on %s\n", server.Address())
@@ -1321,6 +1542,24 @@ func rpc(url, method string, params any) error {
 		"params":  params,
 	}
 	return post(url, request)
+}
+
+// post2 is like post but returns the raw *http.Response (caller closes body).
+func post2(targetURL string, payload any) (*http.Response, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if gatewayAuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+gatewayAuthToken)
+	}
+	client := &http.Client{Timeout: 120 * time.Second}
+	return client.Do(req)
 }
 
 func deleteHTTP(targetURL string) error {

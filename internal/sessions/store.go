@@ -14,12 +14,44 @@ type Role string
 const (
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
+	RoleSystem    Role = "system"
 )
 
+// MessageType indicates the kind of content in a message.
+type MessageType string
+
+const (
+	MessageTypeText       MessageType = "text"
+	MessageTypeToolCall   MessageType = "tool_call"
+	MessageTypeToolResult MessageType = "tool_result"
+	MessageTypeImage      MessageType = "image"
+	MessageTypeFile       MessageType = "file"
+)
+
+// Attachment is an image, file, or other binary payload.
+type Attachment struct {
+	Type     string `json:"type"` // "image", "file", "audio"
+	URL      string `json:"url,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
+	Name     string `json:"name,omitempty"`
+}
+
+// ToolCallData holds the function name and arguments for a tool_call message.
+type ToolCallData struct {
+	ToolCallID string         `json:"toolCallId"`
+	Name       string         `json:"name"`
+	Arguments  map[string]any `json:"arguments,omitempty"`
+	Result     any            `json:"result,omitempty"`
+}
+
 type Message struct {
-	Role      Role      `json:"role"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"createdAt"`
+	Role        Role          `json:"role"`
+	Type        MessageType   `json:"type,omitempty"`
+	Content     string        `json:"content"`
+	ToolCall    *ToolCallData `json:"toolCall,omitempty"`
+	Attachments []Attachment  `json:"attachments,omitempty"`
+	CreatedAt   time.Time     `json:"createdAt"`
 }
 
 type Session struct {
@@ -148,6 +180,53 @@ func (s *Store) Patch(sessionID string, patches []MessagePatch) error {
 type MessagePatch struct {
 	Index   int    `json:"index"`
 	Content string `json:"content"`
+}
+
+// Compact removes messages older than keepN from the start of the session.
+// If keepN >= len(messages) nothing is removed.  Returns number removed.
+func (s *Store) Compact(sessionID string, keepN int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return 0, errors.New("session not found")
+	}
+	total := len(sess.Messages)
+	if keepN < 0 {
+		keepN = 0
+	}
+	if keepN >= total {
+		return 0, nil
+	}
+	removed := total - keepN
+	sess.Messages = sess.Messages[removed:]
+	sess.UpdatedAt = time.Now().UTC()
+	return removed, s.saveLocked()
+}
+
+// Stats returns summary statistics for a session.
+func (s *Store) Stats(sessionID string) (map[string]any, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, false
+	}
+	userCount, assistantCount := 0, 0
+	for _, m := range sess.Messages {
+		if m.Role == RoleUser {
+			userCount++
+		} else {
+			assistantCount++
+		}
+	}
+	return map[string]any{
+		"sessionId":         sessionID,
+		"messageCount":      len(sess.Messages),
+		"userMessages":      userCount,
+		"assistantMessages": assistantCount,
+		"updatedAt":         sess.UpdatedAt,
+	}, true
 }
 
 // Delete removes a session by id. Returns false if it did not exist.

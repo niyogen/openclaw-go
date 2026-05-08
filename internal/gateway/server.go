@@ -27,6 +27,8 @@ type Server struct {
 	host           string
 	port           int
 	authToken      string
+	password       string
+	trustedProxies []string
 	allowedOrigins map[string]struct{}
 	store          *sessions.Store
 	runner         agents.Runner
@@ -40,6 +42,7 @@ type Server struct {
 	secrets        *secretstore.Store
 	rateLimiter    *RateLimiter
 	bus            *EventBus
+	shutdownFn     func()
 	mux            *http.ServeMux
 }
 
@@ -72,6 +75,7 @@ func New(
 	s.approvals = runtime.NewApprovalQueue()
 	s.rateLimiter = NewRateLimiter(120, time.Minute)
 	s.bus = NewEventBus()
+	s.shutdownFn = func() {} // replaced by Run()
 	s.logs, _ = logstore.New(dataDir + "/logs.json")
 	s.cron, _ = cronstore.New(dataDir + "/cron.json")
 	s.hooks, _ = hookstore.New(dataDir + "/hooks.json")
@@ -91,6 +95,7 @@ func New(
 	s.initTools()
 	s.registerRoutes()
 	s.registerOpenAICompatRoutes()
+	s.registerUIRoutes()
 	registry.MountRoutes(mux)
 	return s
 }
@@ -102,12 +107,62 @@ func (s *Server) Address() string {
 // Bus returns the internal event bus so callers can subscribe to gateway events.
 func (s *Server) Bus() *EventBus { return s.bus }
 
+// SetAuth configures additional auth modes (password, trusted proxies).
+func (s *Server) SetAuth(password string, trustedProxies []string) {
+	s.password = strings.TrimSpace(password)
+	s.trustedProxies = trustedProxies
+}
+
 // RegisterExternalPlugin registers an external plugin with the gateway at
 // runtime (after New()).  The plugin's routes are mounted on the mux and it
 // is added to the plugin registry so /plugins lists it.
 func (s *Server) RegisterExternalPlugin(ep plugins.Plugin) {
 	s.registry.Register(ep)
 	ep.RegisterRoutes(s.mux)
+}
+
+// RegisterPluginWS registers a WebSocket upgrade path for an external plugin.
+// Frames sent to /ws/plugins/<name> are forwarded to the plugin's WS endpoint.
+func (s *Server) RegisterPluginWS(pluginName, targetWSURL string) {
+	path := "/ws/plugins/" + pluginName
+	s.mux.HandleFunc(path, s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{
+			ReadBufferSize:  4096,
+			WriteBufferSize: 4096,
+			CheckOrigin:     func(_ *http.Request) bool { return true },
+		}
+		clientConn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer clientConn.Close()
+
+		// Connect to plugin backend.
+		pluginConn, _, err := websocket.DefaultDialer.DialContext(r.Context(), targetWSURL, nil)
+		if err != nil {
+			_ = clientConn.WriteJSON(map[string]string{"error": "plugin ws unavailable: " + err.Error()})
+			return
+		}
+		defer pluginConn.Close()
+
+		// Bidirectional proxy.
+		done := make(chan struct{}, 2)
+		forward := func(from, to *websocket.Conn) {
+			defer func() { done <- struct{}{} }()
+			for {
+				msgType, msg, err := from.ReadMessage()
+				if err != nil {
+					return
+				}
+				if err := to.WriteMessage(msgType, msg); err != nil {
+					return
+				}
+			}
+		}
+		go forward(clientConn, pluginConn)
+		go forward(pluginConn, clientConn)
+		<-done
+	}))
 }
 
 func (s *Server) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
@@ -118,15 +173,27 @@ func (s *Server) HandleFunc(pattern string, handler func(http.ResponseWriter, *h
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	// Start cron scheduler - jobs fire on their schedule until gateway stops.
+	// Wire shutdown function so gateway.stop RPC works.
+	ctx, cancelFromRPC := context.WithCancel(ctx)
+	defer cancelFromRPC()
+	s.shutdownFn = cancelFromRPC
+
+	// Wrap every request with trace logging.
+	tracedMux := s.withTrace(s.mux)
+
+	// Start cron scheduler — jobs fire on their schedule and commands are executed.
 	s.cron.StartScheduler(ctx, func(cronCtx context.Context, job cronstore.Job) {
 		s.logs.Append(logstore.LevelInfo, "cron", "job fired: "+job.Name, map[string]any{"id": job.ID, "schedule": job.Schedule})
+		run := s.cron.ExecuteJob(cronCtx, job)
+		s.bus.Publish(GatewayEvent{Type: EventToolInvoked, Data: map[string]any{
+			"cron": job.ID, "command": job.Command, "exitCode": run.ExitCode, "output": run.Output,
+		}})
 		s.hooks.Emit(hookstore.EventToolInvoked, map[string]any{"cron": job.ID, "command": job.Command})
 	})
 
 	server := &http.Server{
 		Addr:    s.Address(),
-		Handler: s.mux,
+		Handler: tracedMux,
 	}
 
 	go func() {
@@ -152,6 +219,8 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("GET /sessions/{id}/history", s.withAuth(s.handleSessionHistory))
 	s.mux.Handle("POST /sessions/{id}/patch", s.withAuth(s.handleSessionPatch))
 	s.mux.Handle("POST /sessions/{id}/kill", s.withAuth(s.handleSessionKill))
+	s.mux.Handle("POST /sessions/{id}/compact", s.withAuth(s.handleSessionCompact))
+	s.mux.Handle("GET /sessions/{id}/stats", s.withAuth(s.handleSessionStats))
 	s.mux.HandleFunc("/message", s.withAuth(s.withRateLimit(s.handleMessage)))
 	s.mux.Handle("POST /agent/run", s.withAuth(s.withRateLimit(s.handleAgentRun)))
 	s.mux.Handle("GET /approvals", s.withAuth(s.handleApprovalsList))
@@ -171,8 +240,10 @@ func (s *Server) registerRoutes() {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	// Liveness probe: gateway process is alive.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
+		"status":  "live",
 		"service": "openclaw-go-gateway",
 		"version": Version,
 		"time":    time.Now().UTC(),
@@ -229,6 +300,36 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "patched": len(patches)})
+}
+
+func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session id is required"})
+		return
+	}
+	var req struct {
+		KeepN int `json:"keepN"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.KeepN < 0 {
+		req.KeepN = 20 // default: keep last 20 messages
+	}
+	removed, err := s.store.Compact(id, req.KeepN)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
+}
+
+func (s *Server) handleSessionStats(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	stats, ok := s.store.Stats(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
@@ -304,22 +405,49 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) isAuthorized(r *http.Request) bool {
-	if strings.TrimSpace(s.authToken) == "" {
+	// If no auth configured, allow all.
+	if strings.TrimSpace(s.authToken) == "" && strings.TrimSpace(s.password) == "" {
 		return true
 	}
+
 	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
-	if strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
-		token := strings.TrimSpace(authorization[len("Bearer "):])
-		if token == s.authToken {
+
+	// Bearer token.
+	if s.authToken != "" {
+		if strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
+			token := strings.TrimSpace(authorization[len("Bearer "):])
+			if token == s.authToken {
+				return true
+			}
+		}
+		headerToken := strings.TrimSpace(r.Header.Get("X-OpenClaw-Token"))
+		if headerToken != "" && headerToken == s.authToken {
+			return true
+		}
+		queryToken := strings.TrimSpace(r.URL.Query().Get("token"))
+		if queryToken != "" && queryToken == s.authToken {
 			return true
 		}
 	}
-	headerToken := strings.TrimSpace(r.Header.Get("X-OpenClaw-Token"))
-	if headerToken != "" && headerToken == s.authToken {
-		return true
+
+	// HTTP Basic password auth.
+	if s.password != "" {
+		if _, pass, ok := r.BasicAuth(); ok && pass == s.password {
+			return true
+		}
 	}
-	queryToken := strings.TrimSpace(r.URL.Query().Get("token"))
-	return queryToken != "" && queryToken == s.authToken
+
+	// Trusted proxy: allow requests from configured proxy IPs without auth.
+	if len(s.trustedProxies) > 0 {
+		remoteIP := clientIP(r)
+		for _, proxy := range s.trustedProxies {
+			if strings.TrimSpace(proxy) == remoteIP {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 type messageRequest struct {
@@ -684,6 +812,48 @@ func (s *Server) dispatchRPC(
 		return s.rpcLogs(params)
 	case "cron.list":
 		return s.rpcCronList()
+	case "cron.runs":
+		var p struct {
+			ID    string `json:"id"`
+			Limit int    `json:"limit"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if p.Limit <= 0 {
+			p.Limit = 50
+		}
+		return map[string]any{"runs": s.cron.Runs(p.ID, p.Limit)}, nil
+	case "cron.update":
+		var job cronstore.Job
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &job); err != nil || strings.TrimSpace(job.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "job id is required"}
+		}
+		if err := s.cron.Add(job); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "id": job.ID}, nil
+	case "cron.status":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if strings.TrimSpace(p.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "id is required"}
+		}
+		job, ok := s.cron.Get(p.ID)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "job not found"}
+		}
+		return map[string]any{
+			"job":      job,
+			"lastRuns": s.cron.Runs(p.ID, 10),
+		}, nil
 	case "cron.add":
 		return s.rpcCronAdd(params)
 	case "cron.delete":
@@ -692,6 +862,72 @@ func (s *Server) dispatchRPC(
 		return s.rpcHooksList()
 	case "hooks.add":
 		return s.rpcHooksAdd(params)
+	case "hooks.delete":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		_ = json.Unmarshal(params, &p)
+		if strings.TrimSpace(p.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "id is required"}
+		}
+		deleted, err := s.hooks.Remove(p.ID)
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		if !deleted {
+			return nil, &rpcError{Code: -32001, Message: "hook not found"}
+		}
+		return map[string]any{"ok": true, "deleted": p.ID}, nil
+	case "sessions.compact":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			KeepN     int    `json:"keepN"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
+		if p.KeepN <= 0 {
+			p.KeepN = 20
+		}
+		removed, err := s.store.Compact(p.SessionID, p.KeepN)
+		if err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "removed": removed}, nil
+	case "sessions.stats":
+		var p sessionIDParams
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
+		stats, ok := s.store.Stats(p.SessionID)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "session not found"}
+		}
+		return stats, nil
+	case "sessions.patch":
+		var p struct {
+			SessionID string                  `json:"sessionId"`
+			Patches   []sessions.MessagePatch `json:"patches"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
+		if err := s.store.Patch(p.SessionID, p.Patches); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "patched": len(p.Patches)}, nil
 	case "secrets.list":
 		return s.rpcSecretsList()
 	case "secrets.set":
@@ -761,10 +997,82 @@ func (s *Server) dispatchRPC(
 			"sessionId": req.SessionID,
 			"reply":     reply,
 		}, nil
+
+	// ── config.* ───────────────────────────────────────────────────────────
+	case "config.get":
+		// Returns the gateway-level config snapshot (secrets redacted).
+		return map[string]any{
+			"gateway": map[string]any{
+				"host":    s.host,
+				"port":    s.Address(),
+				"version": Version,
+			},
+		}, nil
+
+	// ── doctor.* ───────────────────────────────────────────────────────────
+	case "doctor.check":
+		checks := map[string]any{}
+		checks["sessionStore"] = map[string]any{"ok": true, "sessions": len(s.store.List())}
+		checks["runner"] = map[string]any{"ok": s.runner != nil}
+		checks["eventBus"] = map[string]any{"ok": s.bus != nil}
+		checks["rateLimiter"] = map[string]any{"ok": s.rateLimiter != nil}
+		return map[string]any{"ok": true, "checks": checks, "version": Version}, nil
+
+	// ── tools.catalog (alias for tools.list with more detail) ──────────────
+	case "tools.catalog":
+		return map[string]any{"tools": s.tools.List(), "count": len(s.tools.List())}, nil
+
+	// ── channels.list ──────────────────────────────────────────────────────
+	case "channels.list":
+		// Returns names of registered outbound channel adapters.
+		return map[string]any{"channels": s.route.Names()}, nil
+
+	// ── usage.* ─────────────────────────────────────────────────────────────
+	case "usage.stats":
+		sessionList := s.store.List()
+		totalMessages := 0
+		for _, sess := range sessionList {
+			totalMessages += len(sess.Messages)
+		}
+		return map[string]any{
+			"sessions":      len(sessionList),
+			"totalMessages": totalMessages,
+			"cronJobs":      len(s.cron.List()),
+			"hooks":         len(s.hooks.List()),
+			"secrets":       len(s.secrets.List()),
+			"plugins":       s.registry.Names(),
+		}, nil
+
+	// ── gateway.restart (graceful in-process signal) ──────────────────────
+	case "gateway.stop":
+		// Trigger graceful shutdown — gateway.Run will return.
+		go func() { time.Sleep(200 * time.Millisecond); s.shutdownFn() }()
+		return map[string]any{"ok": true, "message": "gateway shutting down"}, nil
+
+	// ── sessions.all / sessions.count ────────────────────────────────────
+	case "sessions.count":
+		return map[string]any{"count": len(s.store.List())}, nil
+
+	// ── approvals.get ────────────────────────────────────────────────────
+	case "approvals.get":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		_ = json.Unmarshal(params, &p)
+		if req, ok := s.approvals.Get(p.ID); ok {
+			return map[string]any{"approval": req}, nil
+		}
+		return nil, &rpcError{Code: -32001, Message: "approval not found"}
+
 	default:
 		return nil, &rpcError{Code: -32601, Message: "method not found"}
 	}
 }
+
+
 
 // wsFrame is the envelope for all WS messages (inbound and outbound).
 type wsFrame struct {

@@ -14,6 +14,10 @@ const (
 	EventSessionDeleted EventType = "session.deleted"  // session removed
 	EventAgentReply     EventType = "agent.reply"      // assistant reply ready
 	EventApproval       EventType = "approval.pending" // tool call awaiting approval
+	EventToolInvoked    EventType = "tool.invoked"     // a tool was executed (includes cron)
+	EventCronFired      EventType = "cron.fired"       // cron job ran
+	EventHookFired      EventType = "hook.fired"       // event hook dispatched
+	EventPluginLoaded   EventType = "plugin.loaded"    // plugin loaded at startup
 )
 
 // GatewayEvent is the payload broadcast to subscribers.

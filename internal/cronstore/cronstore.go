@@ -2,11 +2,13 @@
 package cronstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -22,7 +24,18 @@ type Job struct {
 	Enabled      bool       `json:"enabled"`
 	LastRunAt    *time.Time `json:"lastRunAt,omitempty"`
 	LastRunError string     `json:"lastRunError,omitempty"`
+	RunCount     int        `json:"runCount"`
 	CreatedAt    time.Time  `json:"createdAt"`
+}
+
+// Run records one execution of a job.
+type Run struct {
+	JobID     string    `json:"jobId"`
+	StartedAt time.Time `json:"startedAt"`
+	Duration  string    `json:"duration"`
+	ExitCode  int       `json:"exitCode"`
+	Output    string    `json:"output,omitempty"`
+	Error     string    `json:"error,omitempty"`
 }
 
 // RunFn is the function called when a job fires.
@@ -32,6 +45,7 @@ type RunFn func(ctx context.Context, job Job)
 type Store struct {
 	mu   sync.Mutex
 	jobs map[string]*Job
+	runs []Run // in-memory run history (capped at 500)
 	path string
 }
 
@@ -40,7 +54,7 @@ func New(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	s := &Store{path: path, jobs: map[string]*Job{}}
+	s := &Store{path: path, jobs: map[string]*Job{}, runs: []Run{}}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -82,6 +96,81 @@ func (s *Store) List() []Job {
 		out = append(out, *j)
 	}
 	return out
+}
+
+// Runs returns the last N run records (most recent last).
+func (s *Store) Runs(jobID string, limit int) []Run {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Run
+	for _, r := range s.runs {
+		if jobID != "" && r.JobID != jobID {
+			continue
+		}
+		out = append(out, r)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out
+}
+
+func (s *Store) recordRun(run Run) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runs = append(s.runs, run)
+	if len(s.runs) > 500 {
+		s.runs = s.runs[len(s.runs)-500:]
+	}
+}
+
+// ExecuteJob runs the job's Command in a subprocess and records the result.
+func (s *Store) ExecuteJob(ctx context.Context, job Job) Run {
+	start := time.Now()
+	run := Run{JobID: job.ID, StartedAt: start}
+	if strings.TrimSpace(job.Command) == "" {
+		run.Error = "no command configured"
+		run.Duration = time.Since(start).String()
+		s.recordRun(run)
+		return run
+	}
+	jobCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(jobCtx, "sh", "-c", job.Command) //nolint:gosec
+	if cmd.Path == "" {
+		// sh not available (Windows) — use cmd /C
+		cmd = exec.CommandContext(jobCtx, "cmd", "/C", job.Command) //nolint:gosec
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	run.Duration = time.Since(start).String()
+	run.Output = strings.TrimSpace(out.String())
+	if err != nil {
+		run.Error = err.Error()
+		if cmd.ProcessState != nil {
+			run.ExitCode = cmd.ProcessState.ExitCode()
+		} else {
+			run.ExitCode = -1
+		}
+	}
+	s.recordRun(run)
+	// Update job metadata.
+	s.mu.Lock()
+	if j, ok := s.jobs[job.ID]; ok {
+		now := time.Now().UTC()
+		j.LastRunAt = &now
+		j.RunCount++
+		if run.Error != "" {
+			j.LastRunError = run.Error
+		} else {
+			j.LastRunError = ""
+		}
+		_ = s.saveLocked()
+	}
+	s.mu.Unlock()
+	return run
 }
 
 // Get returns a single job by id.

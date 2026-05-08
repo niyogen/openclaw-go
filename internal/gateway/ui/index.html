@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenClaw-Go Control Panel</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+    header { background: #1e293b; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; border-bottom: 1px solid #334155; }
+    header h1 { font-size: 1.25rem; font-weight: 600; }
+    .badge { background: #3b82f6; color: white; border-radius: 9999px; padding: 0.15rem 0.6rem; font-size: 0.75rem; }
+    main { padding: 2rem; max-width: 1200px; margin: 0 auto; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem; margin-top: 2rem; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; padding: 1.5rem; }
+    .card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.8rem; }
+    .stat { font-size: 2rem; font-weight: 700; color: #38bdf8; }
+    .sub { font-size: 0.85rem; color: #64748b; margin-top: 0.25rem; }
+    button { background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 0.5rem; cursor: pointer; font-size: 0.875rem; margin-top: 0.75rem; }
+    button:hover { background: #2563eb; }
+    pre { background: #0f172a; border-radius: 0.5rem; padding: 1rem; overflow-x: auto; font-size: 0.8rem; margin-top: 0.75rem; max-height: 200px; overflow-y: auto; color: #94a3b8; }
+    #status { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #ef4444; }
+    #status.ok { background: #22c55e; }
+  </style>
+</head>
+<body>
+<header>
+  <span id="status"></span>
+  <h1>OpenClaw-Go</h1>
+  <span class="badge" id="version">loading…</span>
+</header>
+<main>
+  <p style="color:#64748b; margin-top:1rem">Control panel for the openclaw-go gateway. Data refreshes automatically.</p>
+  <div class="grid">
+    <div class="card">
+      <h2>Gateway</h2>
+      <div class="stat" id="gw-status">—</div>
+      <div class="sub" id="gw-address">—</div>
+    </div>
+    <div class="card">
+      <h2>Sessions</h2>
+      <div class="stat" id="session-count">—</div>
+      <div class="sub">active sessions</div>
+    </div>
+    <div class="card">
+      <h2>Cron Jobs</h2>
+      <div class="stat" id="cron-count">—</div>
+      <div class="sub">scheduled jobs</div>
+    </div>
+    <div class="card">
+      <h2>Hooks</h2>
+      <div class="stat" id="hook-count">—</div>
+      <div class="sub">event hooks</div>
+    </div>
+    <div class="card" style="grid-column: span 2">
+      <h2>Recent Logs</h2>
+      <pre id="log-output">loading…</pre>
+    </div>
+    <div class="card">
+      <h2>Quick infer</h2>
+      <input id="infer-input" type="text" placeholder="Ask something…" style="width:100%;padding:0.5rem;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:0.375rem;font-size:0.875rem" />
+      <button onclick="doInfer()">Send</button>
+      <pre id="infer-output" style="margin-top:0.5rem"></pre>
+    </div>
+  </div>
+</main>
+<script>
+const API = '';
+
+async function rpc(method, params={}) {
+  const r = await fetch(API + '/rpc', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({jsonrpc:'2.0',id:1,method,params})
+  });
+  const j = await r.json();
+  return j.result;
+}
+
+async function refresh() {
+  try {
+    const health = await fetch(API + '/health').then(r => r.json());
+    document.getElementById('status').className = health.ok ? 'ok' : '';
+    document.getElementById('version').textContent = health.version || 'dev';
+    document.getElementById('gw-status').textContent = health.status || 'live';
+
+    const gwStatus = await rpc('gateway.status');
+    if (gwStatus) document.getElementById('gw-address').textContent = gwStatus.address || '';
+
+    const usage = await rpc('usage.stats');
+    if (usage) {
+      document.getElementById('session-count').textContent = usage.sessions ?? '—';
+      document.getElementById('cron-count').textContent = usage.cronJobs ?? '—';
+      document.getElementById('hook-count').textContent = usage.hooks ?? '—';
+    }
+
+    const logs = await rpc('logs.list', {limit:20});
+    if (logs && logs.logs) {
+      document.getElementById('log-output').textContent =
+        logs.logs.map(l => `[${l.level}] ${l.component}: ${l.message}`).join('\n') || '(no logs)';
+    }
+  } catch(e) {
+    document.getElementById('status').className = '';
+    document.getElementById('gw-status').textContent = 'offline';
+  }
+}
+
+async function doInfer() {
+  const msg = document.getElementById('infer-input').value.trim();
+  if (!msg) return;
+  document.getElementById('infer-output').textContent = '…';
+  try {
+    const r = await rpc('message.send', {sessionId:'ui-infer', message: msg, channel:'ui'});
+    document.getElementById('infer-output').textContent = r?.reply || '(no reply)';
+  } catch(e) {
+    document.getElementById('infer-output').textContent = 'Error: ' + e.message;
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

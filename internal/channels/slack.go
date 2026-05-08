@@ -46,9 +46,15 @@ func (s *SlackChannel) Send(ctx context.Context, message OutboundMessage) error 
 	if targetChannel == "" {
 		return nil
 	}
-	payload := map[string]string{
+	payload := map[string]any{
 		"channel": targetChannel,
 		"text":    message.Message,
+	}
+	if strings.TrimSpace(message.ThreadID) != "" {
+		payload["thread_ts"] = message.ThreadID
+	}
+	if strings.TrimSpace(message.MediaURL) != "" {
+		payload["attachments"] = []map[string]string{{"image_url": message.MediaURL}}
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

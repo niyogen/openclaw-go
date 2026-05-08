@@ -12,8 +12,10 @@ type GatewayConfig struct {
 	Host           string   `json:"host"`
 	Port           int      `json:"port"`
 	AuthToken      string   `json:"authToken"`
+	Password       string   `json:"password"` // HTTP Basic password (alternative to token)
 	AllowedOrigins []string `json:"allowedOrigins"`
-	PluginsDir     string   `json:"pluginsDir"` // directory to load external plugins from
+	PluginsDir     string   `json:"pluginsDir"`
+	TrustedProxies []string `json:"trustedProxies"` // IPs/CIDRs that may set X-Forwarded-For
 }
 
 type AgentConfig struct {
@@ -113,11 +115,48 @@ type ChannelsConfig struct {
 	Nostr    NostrChannelConfig    `json:"nostr"`
 }
 
+// MCPServerConfig describes an MCP server endpoint.
+type MCPServerConfig struct {
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	APIKey  string `json:"apiKey"`
+	Enabled bool   `json:"enabled"`
+}
+
+// SkillConfig describes a named capability / skill the agent can use.
+type SkillConfig struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Endpoint    string `json:"endpoint"` // HTTP endpoint for skill invocation
+	Enabled     bool   `json:"enabled"`
+}
+
+// MemoryConfig controls agent memory (context window management).
+type MemoryConfig struct {
+	MaxMessages        int  `json:"maxMessages"`  // 0 = unlimited
+	CompactAfter       int  `json:"compactAfter"` // compact when > N messages
+	SummarizeOnCompact bool `json:"summarizeOnCompact"`
+}
+
+// NodeConfig describes a remote gateway node (multi-node setup).
+type NodeConfig struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	APIKey  string `json:"apiKey"`
+	Enabled bool   `json:"enabled"`
+}
+
+// Config is the full openclaw-go configuration schema.
 type Config struct {
-	Gateway   GatewayConfig   `json:"gateway"`
-	Agent     AgentConfig     `json:"agent"`
-	Providers ProvidersConfig `json:"providers"`
-	Channels  ChannelsConfig  `json:"channels"`
+	Gateway   GatewayConfig     `json:"gateway"`
+	Agent     AgentConfig       `json:"agent"`
+	Providers ProvidersConfig   `json:"providers"`
+	Channels  ChannelsConfig    `json:"channels"`
+	Memory    MemoryConfig      `json:"memory"`
+	MCP       []MCPServerConfig `json:"mcp"`
+	Skills    []SkillConfig     `json:"skills"`
+	Nodes     []NodeConfig      `json:"nodes"`
 }
 
 func Default() Config {
@@ -224,6 +263,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Gateway.PluginsDir == "" {
 		cfg.Gateway.PluginsDir = os.Getenv("OPENCLAW_PLUGINS_DIR")
+	}
+	if cfg.Gateway.Password == "" {
+		cfg.Gateway.Password = os.Getenv("OPENCLAW_GATEWAY_PASSWORD")
 	}
 	if len(cfg.Gateway.AllowedOrigins) == 0 {
 		origins := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_ALLOWED_ORIGINS"))

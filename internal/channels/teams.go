@@ -33,8 +33,12 @@ func (t *TeamsChannel) Send(ctx context.Context, message OutboundMessage) error 
 	if t.outboundURL == "" {
 		return nil
 	}
-	payload := map[string]string{
+	payload := map[string]any{
 		"text": message.Message,
+		"type": "message",
+	}
+	if strings.TrimSpace(message.ThreadID) != "" {
+		payload["replyToId"] = message.ThreadID
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
