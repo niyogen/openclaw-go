@@ -92,7 +92,9 @@ export OPENCLAW_GATEWAY_AUTH_TOKEN="$TOKEN"
 # ── start gateway ─────────────────────────────────────────────────────────────
 
 TMP_CFG=$(mktemp -d)
-cat > "${TMP_CFG}/openclaw.json" <<EOF
+# The binary reads config from $HOME/.openclaw-go/openclaw.json
+mkdir -p "${TMP_CFG}/.openclaw-go"
+cat > "${TMP_CFG}/.openclaw-go/openclaw.json" <<EOF
 {"gateway":{"host":"127.0.0.1","port":${PORT},"authToken":"${TOKEN}"},"agent":{"provider":"echo"}}
 EOF
 
