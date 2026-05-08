@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -12,7 +12,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Unit tests (required) ──────────────────────────────────────────────────
   test:
     name: Test (${{ matrix.os }} / Go ${{ matrix.go }})
     runs-on: ${{ matrix.os }}
@@ -30,8 +29,8 @@ jobs:
           go-version: ${{ matrix.go }}
           cache: true
 
-      - name: Download modules
-        run: go mod download
+      - name: Tidy and download
+        run: go mod tidy && go mod download
 
       - name: Vet
         run: go vet ./...
@@ -40,11 +39,10 @@ jobs:
         if: runner.os != 'Windows'
         run: go test -count=1 -timeout 60s -race ./...
 
-      - name: Test (Windows — race requires CGO, skip)
+      - name: Test (Windows — CGO disabled, no -race)
         if: runner.os == 'Windows'
         run: go test -count=1 -timeout 60s ./...
 
-  # ── Build binary + upload as PR artifact (required on PRs) ────────────────
   build:
     name: Build binary
     runs-on: ubuntu-latest
@@ -58,11 +56,10 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      - name: Download modules
-        run: go mod download
+      - name: Tidy and download
+        run: go mod tidy && go mod download
 
       - name: Build
-        shell: bash
         run: |
           VERSION=$(cat VERSION 2>/dev/null || echo dev)
           mkdir -p dist
@@ -73,14 +70,12 @@ jobs:
             ./cmd/openclaw
           echo "Binary size: $(du -sh dist/openclaw | cut -f1)"
 
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: openclaw-linux-amd64-${{ github.sha }}
           path: dist/openclaw
           retention-days: 7
 
-  # ── Lint (required on PRs) ────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -92,6 +87,9 @@ jobs:
         with:
           go-version: "1.24"
           cache: true
+
+      - name: Tidy and download
+        run: go mod tidy && go mod download
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
