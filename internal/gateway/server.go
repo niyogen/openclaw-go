@@ -99,6 +99,17 @@ func (s *Server) Address() string {
 	return fmt.Sprintf("%s:%d", s.host, s.port)
 }
 
+// Bus returns the internal event bus so callers can subscribe to gateway events.
+func (s *Server) Bus() *EventBus { return s.bus }
+
+// RegisterExternalPlugin registers an external plugin with the gateway at
+// runtime (after New()).  The plugin's routes are mounted on the mux and it
+// is added to the plugin registry so /plugins lists it.
+func (s *Server) RegisterExternalPlugin(ep plugins.Plugin) {
+	s.registry.Register(ep)
+	ep.RegisterRoutes(s.mux)
+}
+
 func (s *Server) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
 	if pattern == "" || handler == nil {
 		return
