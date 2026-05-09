@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"openclaw-go/internal/agents"
@@ -14,11 +15,12 @@ type ToolCallFn func(ctx context.Context, name string, arguments map[string]any)
 
 // RunOptions configures a single agent run.
 type RunOptions struct {
-	SessionID string
-	Message   string
-	History   []agents.HistoryMessage
-	Policy    ExecPolicy
-	Approvals *ApprovalQueue
+	SessionID    string
+	Message      string
+	History      []agents.HistoryMessage
+	Instructions string // system prompt prepended to every turn
+	Policy       ExecPolicy
+	Approvals    *ApprovalQueue
 	// OnToolCall is called before each tool invocation (for logging/hooks). Optional.
 	OnToolCall func(tool string, args map[string]any)
 }
@@ -50,9 +52,10 @@ type RunResult struct {
 
 // Executor runs an agent through a multi-turn loop with policy enforcement.
 type Executor struct {
-	runner agents.Runner
-	toolFn ToolCallFn
-	idGen  func() string
+	runner     agents.Runner
+	toolFn     ToolCallFn
+	subagentFn func(ctx context.Context, message, instructions string) (string, error)
+	idGen      func() string
 }
 
 // NewExecutor creates an executor backed by a runner and optional tool function.
@@ -68,6 +71,12 @@ func NewExecutor(runner agents.Runner, toolFn ToolCallFn) *Executor {
 	}
 }
 
+// SetSubagentFn registers a subagent delegation function.
+// Tools with names starting "subagent." are routed through this function.
+func (e *Executor) SetSubagentFn(fn func(ctx context.Context, message, instructions string) (string, error)) {
+	e.subagentFn = fn
+}
+
 // Run executes the agent with the given options, enforcing the exec policy.
 // It supports multi-turn tool-calling loops: when the model returns tool_calls
 // (OpenAI function-calling format) the executor invokes each tool through
@@ -77,6 +86,14 @@ func (e *Executor) Run(ctx context.Context, opts RunOptions) RunResult {
 	policy := opts.Policy.normalize()
 	var allTurns []TurnResult
 	history := append([]agents.HistoryMessage{}, opts.History...)
+
+	// Prepend system prompt to history if provided.
+	if strings.TrimSpace(opts.Instructions) != "" {
+		history = append([]agents.HistoryMessage{
+			{Role: "system", Content: opts.Instructions},
+		}, history...)
+	}
+
 	currentMessage := opts.Message
 	pendingUserMessage := true // first iteration sends the user message
 
@@ -228,6 +245,19 @@ func (e *Executor) InvokeToolWithPolicy(
 			return rec
 		}
 		rec.Approved = true
+	}
+
+	// Route subagent.* tools through the subagent function if registered.
+	if e.subagentFn != nil && strings.HasPrefix(toolName, "subagent.") {
+		msg, _ := arguments["message"].(string)
+		instructions, _ := arguments["instructions"].(string)
+		result, err := e.subagentFn(ctx, msg, instructions)
+		if err != nil {
+			rec.Error = err.Error()
+		} else {
+			rec.Result = map[string]any{"reply": result}
+		}
+		return rec
 	}
 
 	if e.toolFn == nil {

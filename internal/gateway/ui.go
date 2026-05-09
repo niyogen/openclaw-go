@@ -36,8 +36,8 @@ func (s *Server) registerUIRoutes() {
 		fileServer = http.StripPrefix("/ui", http.FileServer(http.FS(sub)))
 	}
 
-	// Serve /ui and /ui/* — SPA fallback for client-side routing.
-	s.mux.HandleFunc("/ui/", func(w http.ResponseWriter, r *http.Request) {
+	// Serve /ui and /ui/* — auth-guarded, SPA fallback for client-side routing.
+	s.mux.Handle("/ui/", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		// Try the exact path first; fall back to index.html for SPA routing.
 		if UIDir != "" {
 			path := filepath.Join(UIDir, strings.TrimPrefix(r.URL.Path, "/ui"))
@@ -47,9 +47,9 @@ func (s *Server) registerUIRoutes() {
 			}
 		}
 		fileServer.ServeHTTP(w, r)
-	})
+	}))
 
-	// Redirect / → /ui for convenience.
+	// Redirect / → /ui for convenience (no auth required on redirect itself).
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/ui/", http.StatusFound)

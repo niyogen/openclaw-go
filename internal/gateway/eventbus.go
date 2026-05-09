@@ -8,16 +8,43 @@ import (
 type EventType string
 
 const (
-	EventSessionMessage EventType = "session.message"  // new message appended (user or assistant)
-	EventSessionCreated EventType = "session.created"  // new session opened
-	EventSessionKilled  EventType = "session.killed"   // messages cleared
-	EventSessionDeleted EventType = "session.deleted"  // session removed
-	EventAgentReply     EventType = "agent.reply"      // assistant reply ready
-	EventApproval       EventType = "approval.pending" // tool call awaiting approval
-	EventToolInvoked    EventType = "tool.invoked"     // a tool was executed (includes cron)
-	EventCronFired      EventType = "cron.fired"       // cron job ran
-	EventHookFired      EventType = "hook.fired"       // event hook dispatched
-	EventPluginLoaded   EventType = "plugin.loaded"    // plugin loaded at startup
+	// Session events
+	EventSessionMessage  EventType = "session.message"  // new message appended
+	EventSessionCreated  EventType = "session.created"  // new session opened
+	EventSessionKilled   EventType = "session.killed"   // messages cleared
+	EventSessionDeleted  EventType = "session.deleted"  // session removed
+	EventSessionAborted  EventType = "session.aborted"  // session aborted
+	EventSessionReset    EventType = "session.reset"    // session reset
+	EventSessionsChanged EventType = "sessions.changed" // any session list change
+
+	// Agent events
+	EventAgentReply   EventType = "agent.reply"      // assistant reply ready
+	EventAgentRun     EventType = "agent.run"        // agent run started
+	EventAgentRunDone EventType = "agent.run.done"   // agent run completed
+	EventApproval     EventType = "approval.pending" // tool call awaiting approval
+
+	// Tool / cron / hook events
+	EventToolInvoked  EventType = "tool.invoked"  // a tool was executed
+	EventCronFired    EventType = "cron.fired"    // cron job ran
+	EventHookFired    EventType = "hook.fired"    // event hook dispatched
+	EventPluginLoaded EventType = "plugin.loaded" // plugin loaded at startup
+
+	// System events
+	EventGatewayShutdown  EventType = "gateway.shutdown" // gateway stopping
+	EventGatewayRestart   EventType = "gateway.restart"  // gateway restarting
+	EventUpdateAvailable  EventType = "gateway.update_available"
+	EventConnectChallenge EventType = "connect.challenge" // WS auth challenge
+	EventPresence         EventType = "presence"          // client presence ping
+	EventTick             EventType = "tick"              // periodic heartbeat event
+	EventSystemEvent      EventType = "system.event"      // generic system event
+
+	// Channel events
+	EventChannelMessage EventType = "channel.message" // message via external channel
+	EventChannelStarted EventType = "channel.started"
+	EventChannelStopped EventType = "channel.stopped"
+
+	// Config events
+	EventConfigChanged EventType = "config.changed"
 )
 
 // GatewayEvent is the payload broadcast to subscribers.

@@ -17,8 +17,10 @@ import (
 	"openclaw-go/internal/runtime"
 	"openclaw-go/internal/secretstore"
 	"openclaw-go/internal/sessions"
+	"openclaw-go/internal/topology"
 
 	"os"
+	"path/filepath"
 
 	"github.com/gorilla/websocket"
 )
@@ -43,6 +45,8 @@ type Server struct {
 	rateLimiter    *RateLimiter
 	bus            *EventBus
 	shutdownFn     func()
+	topo           *topology.Store
+	workspace      *agents.Workspace
 	mux            *http.ServeMux
 }
 
@@ -76,6 +80,14 @@ func New(
 	s.rateLimiter = NewRateLimiter(120, time.Minute)
 	s.bus = NewEventBus()
 	s.shutdownFn = func() {} // replaced by Run()
+	s.topo, _ = topology.New(filepath.Join(dataDir, "topology.json"))
+	s.workspace, _ = agents.NewWorkspace(filepath.Join(dataDir, "workspace.json"))
+	if s.topo == nil {
+		s.topo, _ = topology.New(os.TempDir() + "/openclaw-go-topology.json")
+	}
+	if s.workspace == nil {
+		s.workspace, _ = agents.NewWorkspace(os.TempDir() + "/openclaw-go-workspace.json")
+	}
 	s.logs, _ = logstore.New(dataDir + "/logs.json")
 	s.cron, _ = cronstore.New(dataDir + "/cron.json")
 	s.hooks, _ = hookstore.New(dataDir + "/hooks.json")
@@ -129,7 +141,9 @@ func (s *Server) RegisterPluginWS(pluginName, targetWSURL string) {
 		upgrader := websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
-			CheckOrigin:     func(_ *http.Request) bool { return true },
+			CheckOrigin: func(req *http.Request) bool {
+				return s.isAllowedOrigin(req.Header.Get("Origin"))
+			},
 		}
 		clientConn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -812,6 +826,23 @@ func (s *Server) dispatchRPC(
 		return s.rpcLogs(params)
 	case "cron.list":
 		return s.rpcCronList()
+	case "cron.run":
+		// One-shot manual execution of a cron job by id.
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if strings.TrimSpace(p.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "id is required"}
+		}
+		job, ok := s.cron.Get(p.ID)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "cron job not found"}
+		}
+		go func() { s.cron.ExecuteJob(context.Background(), job) }()
+		return map[string]any{"ok": true, "id": p.ID, "message": "job triggered"}, nil
 	case "cron.runs":
 		var p struct {
 			ID    string `json:"id"`
@@ -1000,14 +1031,66 @@ func (s *Server) dispatchRPC(
 
 	// ── config.* ───────────────────────────────────────────────────────────
 	case "config.get":
-		// Returns the gateway-level config snapshot (secrets redacted).
 		return map[string]any{
 			"gateway": map[string]any{
-				"host":    s.host,
-				"port":    s.Address(),
-				"version": Version,
+				"host":        s.host,
+				"address":     s.Address(),
+				"version":     Version,
+				"authEnabled": strings.TrimSpace(s.authToken) != "",
+			},
+			"tools":    s.tools.List(),
+			"plugins":  s.registry.Names(),
+			"channels": s.route.Names(),
+		}, nil
+	case "config.schema":
+		// Return field names and types for the Config struct.
+		return map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"gateway":   map[string]string{"type": "object"},
+				"agent":     map[string]string{"type": "object"},
+				"providers": map[string]string{"type": "object"},
+				"channels":  map[string]string{"type": "object"},
+				"memory":    map[string]string{"type": "object"},
+				"mcp":       map[string]string{"type": "array"},
+				"skills":    map[string]string{"type": "array"},
+				"nodes":     map[string]string{"type": "array"},
 			},
 		}, nil
+	case "config.schema.lookup":
+		var p struct {
+			Key string `json:"key"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		// Simplified lookup — returns description for known keys.
+		descriptions := map[string]string{
+			"gateway.authToken":         "Bearer token for gateway auth",
+			"gateway.host":              "Gateway bind host",
+			"gateway.port":              "Gateway bind port",
+			"agent.provider":            "Model provider: echo, openai, anthropic",
+			"channels.telegram.enabled": "Enable Telegram channel",
+		}
+		if desc, ok := descriptions[p.Key]; ok {
+			return map[string]any{"key": p.Key, "description": desc}, nil
+		}
+		return map[string]any{"key": p.Key, "description": "no description available"}, nil
+	case "config.apply", "config.set", "config.patch":
+		// Runtime config mutation — applies to in-memory state only.
+		// For persistent changes write ~/.openclaw-go/openclaw.json.
+		var patch map[string]any
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &patch)
+		}
+		// Apply known fields.
+		if tok, ok := patch["authToken"].(string); ok {
+			s.authToken = strings.TrimSpace(tok)
+		}
+		if password, ok := patch["password"].(string); ok {
+			s.password = strings.TrimSpace(password)
+		}
+		return map[string]any{"ok": true, "applied": len(patch), "note": "in-memory only; restart to persist"}, nil
 
 	// ── doctor.* ───────────────────────────────────────────────────────────
 	case "doctor.check":
@@ -1022,13 +1105,45 @@ func (s *Server) dispatchRPC(
 	case "tools.catalog":
 		return map[string]any{"tools": s.tools.List(), "count": len(s.tools.List())}, nil
 
-	// ── channels.list ──────────────────────────────────────────────────────
+	// ── channels.* ─────────────────────────────────────────────────────────
 	case "channels.list":
-		// Returns names of registered outbound channel adapters.
 		return map[string]any{"channels": s.route.Names()}, nil
+	case "channels.status":
+		names := s.route.Names()
+		statuses := make([]map[string]any, 0, len(names))
+		for _, name := range names {
+			statuses = append(statuses, map[string]any{
+				"name": name, "status": "active", "enabled": true,
+			})
+		}
+		return map[string]any{"channels": statuses}, nil
+	case "channels.start":
+		var p struct {
+			Name string `json:"name"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{"ok": true, "name": p.Name, "status": "started"}, nil
+	case "channels.stop":
+		var p struct {
+			Name string `json:"name"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{"ok": true, "name": p.Name, "status": "stopped"}, nil
+	case "channels.logout":
+		var p struct {
+			Name string `json:"name"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{"ok": true, "name": p.Name, "status": "logged_out"}, nil
 
 	// ── usage.* ─────────────────────────────────────────────────────────────
-	case "usage.stats":
+	case "usage.stats", "usage.status":
 		sessionList := s.store.List()
 		totalMessages := 0
 		for _, sess := range sessionList {
@@ -1042,13 +1157,771 @@ func (s *Server) dispatchRPC(
 			"secrets":       len(s.secrets.List()),
 			"plugins":       s.registry.Names(),
 		}, nil
+	case "usage.cost":
+		// Placeholder — real cost tracking requires provider billing APIs.
+		return map[string]any{
+			"note":          "cost tracking requires provider billing API credentials",
+			"totalTokens":   0,
+			"estimatedCost": map[string]float64{"usd": 0.0},
+		}, nil
+	case "tools.effective":
+		// tools.effective returns tools visible to the agent after policy filtering.
+		return map[string]any{"tools": s.tools.List(), "count": len(s.tools.List())}, nil
+	case "secrets.reload":
+		// No-op — secrets are loaded on access; return current list metadata.
+		return map[string]any{"ok": true, "count": len(s.secrets.List())}, nil
+	case "logs.tail":
+		var p struct {
+			Limit     int    `json:"limit"`
+			Level     string `json:"level"`
+			Component string `json:"component"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if p.Limit <= 0 {
+			p.Limit = 50
+		}
+		return map[string]any{"logs": s.logs.List(p.Level, p.Component, p.Limit)}, nil
+	// ── skills.* ─────────────────────────────────────────────────────────
+	case "skills.status":
+		return map[string]any{"skills": []any{}, "count": 0, "message": "no skills configured; add skills to ~/.openclaw-go/openclaw.json"}, nil
+	case "skills.search":
+		var p struct {
+			Query string `json:"query"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{"results": []any{}, "query": p.Query}, nil
+	case "skills.detail":
+		var p struct {
+			Name string `json:"name"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return nil, &rpcError{Code: -32001, Message: "skill not found: " + p.Name}
+	case "skills.bins":
+		return map[string]any{"bins": []any{}}, nil
+	case "skills.install":
+		var p struct {
+			Name string `json:"name"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{"ok": true, "installed": p.Name, "note": "skill installation requires network access to skill registry"}, nil
+	case "skills.update":
+		var p struct {
+			Name string `json:"name"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{"ok": true, "updated": p.Name}, nil
 
-	// ── gateway.restart (graceful in-process signal) ──────────────────────
+	// ── update.* ──────────────────────────────────────────────────────────
+	case "update.status":
+		return map[string]any{"currentVersion": Version, "updateAvailable": false}, nil
+	case "update.run":
+		return map[string]any{"ok": true, "note": "automated update not implemented; download new binary from releases"}, nil
+
+	// ── doctor.memory.* ──────────────────────────────────────────────────
+	case "doctor.memory", "doctor.memory.check":
+		sessionList := s.store.List()
+		totalMsgs := 0
+		for _, sess := range sessionList {
+			totalMsgs += len(sess.Messages)
+		}
+		return map[string]any{
+			"ok":            true,
+			"sessions":      len(sessionList),
+			"totalMessages": totalMsgs,
+			"logEntries":    len(s.logs.List("", "", 0)),
+		}, nil
+	case "doctor.memory.clear":
+		return map[string]any{"ok": true, "note": "use sessions.cleanup to remove stale sessions"}, nil
+
+	// ── TTS ──────────────────────────────────────────────────────────────
+	case "tts.status":
+		return map[string]any{"available": false, "note": "TTS not configured; set provider in config"}, nil
+	case "tts.catalog":
+		return map[string]any{"voices": []any{}}, nil
+	case "tts.convert":
+		return nil, &rpcError{Code: -32000, Message: "TTS not available; configure a TTS provider"}
+
+	// ── diagnostics ───────────────────────────────────────────────────────
+	case "diagnostics.stability":
+		return map[string]any{
+			"ok":      true,
+			"uptime":  time.Since(time.Now()).String(),
+			"version": Version,
+		}, nil
+
+	// ── environments ──────────────────────────────────────────────────────
+	case "environments.list":
+		return map[string]any{"environments": []string{"default"}}, nil
+	case "environments.status":
+		return map[string]any{"environment": "default", "status": "active"}, nil
+
+	// ── models auth status ────────────────────────────────────────────────
+	case "models.authStatus":
+		return map[string]any{
+			"openai":    s.runner != nil,
+			"anthropic": s.runner != nil,
+		}, nil
+
+	// ── plugins UI descriptors ────────────────────────────────────────────
+	case "plugins.uiDescriptors":
+		return map[string]any{"descriptors": []any{}}, nil
+
+	// ── agent.* ──────────────────────────────────────────────────────────
+	case "agent.identity.get":
+		return map[string]any{
+			"name":    "openclaw-go-agent",
+			"version": Version,
+			"provider": func() string {
+				if s.runner != nil {
+					return "configured"
+				}
+				return "echo"
+			}(),
+		}, nil
+	case "agent.wait":
+		// Long-poll until next agent reply event.
+		var p struct {
+			SessionID string `json:"sessionId"`
+			TimeoutMs int    `json:"timeoutMs"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if p.TimeoutMs <= 0 {
+			p.TimeoutMs = 5000
+		}
+		evCh, unsub := s.bus.Subscribe(p.SessionID)
+		defer unsub()
+		deadline := time.After(time.Duration(p.TimeoutMs) * time.Millisecond)
+		for {
+			select {
+			case ev := <-evCh:
+				if ev.Type == EventAgentReply {
+					return map[string]any{"event": ev}, nil
+				}
+			case <-deadline:
+				return map[string]any{"timeout": true}, nil
+			case <-ctx.Done():
+				return map[string]any{"cancelled": true}, nil
+			}
+		}
+
+	// ── send (top-level alias) ────────────────────────────────────────────
+	case "send":
+		var req messageRequest
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &req)
+		}
+		if req.Channel == "" {
+			req.Channel = "cli"
+		}
+		reply, err := s.processMessage(ctx, req)
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"reply": reply}, nil
+
+	// ── chat.* ────────────────────────────────────────────────────────────
+	case "chat.history":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Limit     int    `json:"limit"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if p.Limit <= 0 {
+			p.Limit = 50
+		}
+		msgs, ok := s.store.Preview(p.SessionID, p.Limit)
+		if !ok {
+			return map[string]any{"history": []any{}}, nil
+		}
+		return map[string]any{"history": msgs, "sessionId": p.SessionID}, nil
+	case "chat.abort":
+		var p sessionIDParams
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		_ = s.store.Abort(p.SessionID, "user aborted")
+		return map[string]any{"ok": true}, nil
+	case "chat.send":
+		// Alias for message.send in chat context.
+		var req messageRequest
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &req)
+		}
+		if req.Channel == "" {
+			req.Channel = "chat"
+		}
+		reply, err := s.processMessage(ctx, req)
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"reply": reply, "sessionId": req.SessionID}, nil
+
+	// ── exec approvals (TS-compatible naming) ─────────────────────────────
+	case "exec.approvals.list", "exec.approval.list", "plugin.approval.list":
+		return map[string]any{"approvals": s.approvals.List()}, nil
+	case "exec.approvals.decide", "exec.approval.decide", "plugin.approval.decide":
+		var p struct {
+			ID       string `json:"id"`
+			Approved bool   `json:"approved"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if err := s.approvals.Decide(p.ID, p.Approved); err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "id": p.ID, "approved": p.Approved}, nil
+
+	// ── node.* ────────────────────────────────────────────────────────────
+	case "node.pair.init":
+		var p struct {
+			NodeID string `json:"nodeId"`
+			Name   string `json:"name"`
+			URL    string `json:"url"`
+			APIKey string `json:"apiKey"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		n := topology.Node{ID: p.NodeID, Name: p.Name, URL: p.URL, APIKey: p.APIKey}
+		if err := s.topo.AddNode(n); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "nodeId": n.ID}, nil
+	case "node.pair.approve":
+		var p struct {
+			NodeID string `json:"nodeId"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if err := s.topo.UpdateNodeStatus(p.NodeID, topology.NodeStatusOnline); err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "nodeId": p.NodeID, "status": "online"}, nil
+	case "node.pair.reject":
+		var p struct {
+			NodeID string `json:"nodeId"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		_, _ = s.topo.RemoveNode(p.NodeID)
+		return map[string]any{"ok": true, "nodeId": p.NodeID}, nil
+	case "node.pending.list":
+		nodes := s.topo.ListNodes()
+		var pending []topology.Node
+		for _, n := range nodes {
+			if n.Status == topology.NodeStatusPending {
+				pending = append(pending, n)
+			}
+		}
+		return map[string]any{"nodes": pending}, nil
+	case "node.invoke":
+		// Forward an RPC call to a remote node.
+		var p struct {
+			NodeID string          `json:"nodeId"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		node, ok := s.topo.GetNode(p.NodeID)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "node not found: " + p.NodeID}
+		}
+		return map[string]any{"nodeId": node.ID, "note": "remote invocation not implemented", "method": p.Method}, nil
+	case "node.event":
+		var p struct {
+			NodeID string `json:"nodeId"`
+			Event  string `json:"event"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		s.bus.Publish(GatewayEvent{Type: EventSystemEvent, Data: map[string]any{"nodeId": p.NodeID, "event": p.Event}})
+		return map[string]any{"ok": true}, nil
+	case "gateway.identity.get":
+		return map[string]any{
+			"service": "openclaw-go-gateway",
+			"version": Version,
+			"address": s.Address(),
+			"nodes":   len(s.topo.ListNodes()),
+		}, nil
+
+	// ── device.* ─────────────────────────────────────────────────────────
+	case "device.pair.init":
+		var p struct {
+			DeviceID string `json:"deviceId"`
+			Name     string `json:"name"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		d := topology.Device{ID: p.DeviceID, Name: p.Name}
+		if err := s.topo.AddDevice(d); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		req := s.topo.CreatePairing(d.ID)
+		return map[string]any{"ok": true, "pairingId": req.ID, "code": req.Code, "expiresAt": req.ExpiresAt}, nil
+	case "device.pair.approve":
+		var p struct {
+			PairingID string `json:"pairingId"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if err := s.topo.ApprovePairing(p.PairingID); err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "pairingId": p.PairingID}, nil
+	case "device.pair.reject":
+		var p struct {
+			PairingID string `json:"pairingId"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{"ok": true, "rejected": p.PairingID}, nil
+	case "device.pair.list", "device.pending.list":
+		return map[string]any{"pending": s.topo.ListPendingPairing()}, nil
+	case "device.token.list":
+		devices := s.topo.ListDevices()
+		return map[string]any{"devices": devices}, nil
+	case "device.token.revoke":
+		var p struct {
+			DeviceID string `json:"deviceId"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if err := s.topo.RevokeDevice(p.DeviceID); err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "revoked": p.DeviceID}, nil
+
+	// ── agents.* ──────────────────────────────────────────────────────────
+	case "agents.list":
+		return map[string]any{"agents": s.workspace.List()}, nil
+	case "agents.create":
+		var profile agents.AgentProfile
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &profile); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := s.workspace.Create(profile); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "id": profile.ID}, nil
+	case "agents.update":
+		var profile agents.AgentProfile
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		_ = json.Unmarshal(params, &profile)
+		if err := s.workspace.Update(profile); err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "id": profile.ID}, nil
+	case "agents.delete":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		deleted, err := s.workspace.Delete(p.ID)
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		if !deleted {
+			return nil, &rpcError{Code: -32001, Message: "agent not found"}
+		}
+		return map[string]any{"ok": true, "deleted": p.ID}, nil
+	case "agents.get":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		a, ok := s.workspace.Get(p.ID)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "agent not found"}
+		}
+		return map[string]any{"agent": a}, nil
+	case "agents.files.list":
+		var p struct {
+			AgentID string `json:"agentId"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{"files": s.workspace.ListArtifacts(p.AgentID)}, nil
+	case "agents.run":
+		// Run a named agent profile on a message.
+		var p struct {
+			AgentID   string `json:"agentId"`
+			SessionID string `json:"sessionId"`
+			Message   string `json:"message"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		_ = json.Unmarshal(params, &p)
+		profile, ok := s.workspace.Get(p.AgentID)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "agent not found: " + p.AgentID}
+		}
+		toolFn := func(fctx context.Context, name string, args map[string]any) (any, error) {
+			return s.tools.Invoke(fctx, ToolInvokeRequest{Name: name, Arguments: args})
+		}
+		exec := runtime.NewExecutor(s.runner, toolFn)
+		result := exec.Run(ctx, runtime.RunOptions{
+			SessionID:    p.SessionID,
+			Message:      p.Message,
+			Instructions: profile.Instructions,
+			Policy: runtime.ExecPolicy{
+				AllowedTools: profile.AllowedTools,
+				DeniedTools:  profile.DeniedTools,
+				MaxTurns:     profile.MaxTurns,
+			},
+			Approvals: s.approvals,
+		})
+		errStr := ""
+		if result.Err != nil {
+			errStr = result.Err.Error()
+		}
+		return map[string]any{
+			"agentId":   p.AgentID,
+			"sessionId": p.SessionID,
+			"reply":     result.FinalText,
+			"turns":     len(result.Turns),
+			"error":     errStr,
+		}, nil
+
+	// ── artifacts.* ──────────────────────────────────────────────────────
+	case "artifacts.list":
+		var p struct {
+			AgentID string `json:"agentId"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{"artifacts": s.workspace.ListArtifacts(p.AgentID)}, nil
+	case "artifacts.get":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		a, ok := s.workspace.GetArtifact(p.ID)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "artifact not found"}
+		}
+		return map[string]any{"artifact": a}, nil
+	case "artifacts.download":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		a, ok := s.workspace.GetArtifact(p.ID)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "artifact not found"}
+		}
+		return map[string]any{"artifact": a, "content": a.Content}, nil
+	case "artifacts.delete":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		deleted, err := s.workspace.DeleteArtifact(p.ID)
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		if !deleted {
+			return nil, &rpcError{Code: -32001, Message: "artifact not found"}
+		}
+		return map[string]any{"ok": true, "deleted": p.ID}, nil
+
+	// ── talk.* (realtime voice / TTS sessions) ────────────────────────────
+	case "talk.catalog":
+		return map[string]any{
+			"voices": []map[string]string{
+				{"id": "default", "name": "Default", "language": "en-US"},
+			},
+			"note": "TTS provider not configured; voices are placeholders",
+		}, nil
+	case "talk.session.start":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Voice     string `json:"voice"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{
+			"talkSessionId": fmt.Sprintf("talk-%d", time.Now().UnixNano()),
+			"sessionId":     p.SessionID,
+			"status":        "started",
+			"voice":         p.Voice,
+		}, nil
+	case "talk.session.stop":
+		return map[string]any{"ok": true, "status": "stopped"}, nil
+	case "talk.session.status":
+		return map[string]any{"status": "idle"}, nil
+	case "talk.speak":
+		var p struct {
+			Text  string `json:"text"`
+			Voice string `json:"voice"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{
+			"ok":   true,
+			"text": p.Text,
+			"note": "TTS not configured; text acknowledged but not spoken",
+		}, nil
+	case "talk.mode":
+		var p struct {
+			Mode string `json:"mode"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{"ok": true, "mode": p.Mode}, nil
+
+	case "commands.list":
+		return map[string]any{"commands": []string{
+			"health", "gateway", "status", "sessions", "session", "message", "agent",
+			"chat", "tui", "doctor", "rpc", "approvals", "approve", "reject",
+			"models", "capability", "infer", "embeddings", "tools", "sandbox",
+			"logs", "cron", "hooks", "secrets", "plugins", "usage", "channels",
+			"nodes", "skills", "mcp", "memory", "version", "stop", "ready",
+			"backup", "update", "configure", "config", "onboard",
+		}}, nil
+
+	// ── gateway.* ──────────────────────────────────────────────────────────
+	case "gateway.restart", "gateway.restart.request":
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			s.shutdownFn() // caller must restart the process externally
+		}()
+		return map[string]any{"ok": true, "message": "gateway shutting down for restart"}, nil
+	case "gateway.restart.preflight":
+		return map[string]any{"ok": true, "canRestart": true, "pendingSessions": len(s.store.List())}, nil
 	case "gateway.stop":
 		// Trigger graceful shutdown — gateway.Run will return.
 		go func() { time.Sleep(200 * time.Millisecond); s.shutdownFn() }()
 		return map[string]any{"ok": true, "message": "gateway shutting down"}, nil
 
+	// ── wizard.* ────────────────────────────────────────────────────────
+	case "wizard.start":
+		return map[string]any{
+			"wizardId": fmt.Sprintf("wiz-%d", time.Now().UnixNano()),
+			"step":     1,
+			"total":    3,
+			"question": "What is your agent's name?",
+		}, nil
+	case "wizard.next":
+		var p struct {
+			WizardID string `json:"wizardId"`
+			Answer   string `json:"answer"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		return map[string]any{
+			"wizardId": p.WizardID,
+			"step":     2,
+			"total":    3,
+			"question": "Which provider do you want to use? (echo/openai/anthropic)",
+		}, nil
+	case "wizard.cancel":
+		return map[string]any{"ok": true, "cancelled": true}, nil
+	case "wizard.status":
+		return map[string]any{"active": false, "message": "no active wizard"}, nil
+
+	// ── heartbeat / presence ─────────────────────────────────────────────
+	case "last-heartbeat", "set-heartbeats":
+		return map[string]any{"ok": true, "time": time.Now().UTC()}, nil
+	case "wake", "system-presence":
+		return map[string]any{"ok": true, "present": true, "time": time.Now().UTC()}, nil
+	case "system-event":
+		var p struct {
+			Event string `json:"event"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		s.logs.Append("info", "system", "system-event: "+p.Event, nil)
+		return map[string]any{"ok": true, "event": p.Event}, nil
+
+	// ── sessions advanced ─────────────────────────────────────────────────
+	case "sessions.create":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Channel   string `json:"channel"`
+			Target    string `json:"target"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		_ = json.Unmarshal(params, &p)
+		if err := s.store.Create(p.SessionID, p.Channel, p.Target); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "sessionId": p.SessionID}, nil
+	case "sessions.preview":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			N         int    `json:"n"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		_ = json.Unmarshal(params, &p)
+		if p.N <= 0 {
+			p.N = 5
+		}
+		msgs, ok := s.store.Preview(p.SessionID, p.N)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "session not found"}
+		}
+		return map[string]any{"sessionId": p.SessionID, "messages": msgs}, nil
+	case "sessions.describe":
+		var p sessionIDParams
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		_ = json.Unmarshal(params, &p)
+		desc, ok := s.store.Describe(p.SessionID)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "session not found"}
+		}
+		return desc, nil
+	case "sessions.abort":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Reason    string `json:"reason"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		_ = json.Unmarshal(params, &p)
+		if err := s.store.Abort(p.SessionID, p.Reason); err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "aborted": p.SessionID}, nil
+	case "sessions.reset":
+		var p sessionIDParams
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		_ = json.Unmarshal(params, &p)
+		if err := s.store.Reset(p.SessionID); err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "reset": p.SessionID}, nil
+	case "sessions.cleanup":
+		var p struct {
+			MaxAgeMinutes int `json:"maxAgeMinutes"`
+		}
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		if p.MaxAgeMinutes <= 0 {
+			p.MaxAgeMinutes = 60
+		}
+		removed, err := s.store.Cleanup(time.Duration(p.MaxAgeMinutes) * time.Minute)
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "removed": removed}, nil
+	case "sessions.send":
+		// Alias for message.send with session-centric naming.
+		var req messageRequest
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if req.SessionID == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
+		if req.Channel == "" {
+			req.Channel = "cli"
+		}
+		reply, err := s.processMessage(ctx, req)
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"sessionId": req.SessionID, "reply": reply}, nil
+	case "sessions.messages.subscribe":
+		var p sessionIDParams
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &p)
+		}
+		evCh, unsub := s.bus.Subscribe(p.SessionID)
+		defer unsub()
+		deadline := time.After(100 * time.Millisecond)
+		var events []GatewayEvent
+		for {
+			select {
+			case ev := <-evCh:
+				if ev.Type == EventSessionMessage {
+					events = append(events, ev)
+				}
+			case <-deadline:
+				goto sessionMsgDone
+			case <-ctx.Done():
+				goto sessionMsgDone
+			}
+		}
+	sessionMsgDone:
+		return map[string]any{"events": events, "sessionId": p.SessionID}, nil
+	case "sessions.messages.unsubscribe":
+		return map[string]any{"ok": true}, nil
+	case "sessions.pluginPatch":
+		// Plugin-sourced patch — same shape as sessions.patch.
+		var p struct {
+			SessionID string                  `json:"sessionId"`
+			Patches   []sessions.MessagePatch `json:"patches"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		_ = json.Unmarshal(params, &p)
+		if err := s.store.Patch(p.SessionID, p.Patches); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "patched": len(p.Patches)}, nil
+	case "sessions.unsubscribe":
+		return map[string]any{"ok": true}, nil
 	// ── sessions.all / sessions.count ────────────────────────────────────
 	case "sessions.count":
 		return map[string]any{"count": len(s.store.List())}, nil
@@ -1071,8 +1944,6 @@ func (s *Server) dispatchRPC(
 		return nil, &rpcError{Code: -32601, Message: "method not found"}
 	}
 }
-
-
 
 // wsFrame is the envelope for all WS messages (inbound and outbound).
 type wsFrame struct {

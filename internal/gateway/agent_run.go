@@ -42,9 +42,10 @@ func (s *agentRunStore) put(id string, result runtime.RunResult) {
 }
 
 type agentRunRequest struct {
-	SessionID string              `json:"sessionId"`
-	Message   string              `json:"message"`
-	Policy    *runtime.ExecPolicy `json:"policy,omitempty"`
+	SessionID    string              `json:"sessionId"`
+	Message      string              `json:"message"`
+	Instructions string              `json:"instructions,omitempty"` // system prompt
+	Policy       *runtime.ExecPolicy `json:"policy,omitempty"`
 }
 
 type agentRunResponse struct {
@@ -101,11 +102,12 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 	}
 	exec := runtime.NewExecutor(s.runner, toolFn)
 	result := exec.Run(r.Context(), runtime.RunOptions{
-		SessionID: req.SessionID,
-		Message:   req.Message,
-		History:   history,
-		Policy:    policy,
-		Approvals: s.approvals,
+		SessionID:    req.SessionID,
+		Message:      req.Message,
+		History:      history,
+		Instructions: req.Instructions,
+		Policy:       policy,
+		Approvals:    s.approvals,
 	})
 
 	var errStr string

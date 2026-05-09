@@ -9,6 +9,20 @@ type InboundMessage struct {
 	Message   string `json:"message"`
 }
 
+// Button is an interactive button for channel messages (Slack, Discord).
+type Button struct {
+	Label  string `json:"label"`
+	Value  string `json:"value"`
+	Style  string `json:"style,omitempty"` // "primary", "danger", "default"
+	Action string `json:"action,omitempty"`
+}
+
+// Reaction represents an emoji reaction to add to a message.
+type Reaction struct {
+	Emoji     string `json:"emoji"` // e.g. "thumbsup", "heart"
+	MessageID string `json:"messageId,omitempty"`
+}
+
 type OutboundMessage struct {
 	SessionID string `json:"sessionId"`
 	Channel   string `json:"channel"`
@@ -19,6 +33,12 @@ type OutboundMessage struct {
 	ThreadID string `json:"threadId,omitempty"`
 	// MediaURL is an optional image/file attachment URL.
 	MediaURL string `json:"mediaUrl,omitempty"`
+	// Buttons are interactive action buttons (Slack Block Kit, Discord components).
+	Buttons []Button `json:"buttons,omitempty"`
+	// Reactions are emoji reactions to add after posting.
+	Reactions []Reaction `json:"reactions,omitempty"`
+	// Ephemeral means the message is only visible to the target user (Slack).
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 type Channel interface {

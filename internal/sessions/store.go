@@ -182,6 +182,66 @@ type MessagePatch struct {
 	Content string `json:"content"`
 }
 
+// Create makes a new empty session (alternative to UpsertSession).
+func (s *Store) Create(id, channel, target string) error {
+	return s.UpsertSession(id, channel, target)
+}
+
+// Describe returns a human-readable summary of a session.
+func (s *Store) Describe(sessionID string) (map[string]any, bool) {
+	return s.Stats(sessionID)
+}
+
+// Preview returns the last N messages of a session (for quick display).
+func (s *Store) Preview(sessionID string, n int) ([]Message, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, false
+	}
+	msgs := sess.Messages
+	if n > 0 && len(msgs) > n {
+		msgs = msgs[len(msgs)-n:]
+	}
+	out := make([]Message, len(msgs))
+	copy(out, msgs)
+	return out, true
+}
+
+// Abort marks a session as aborted (adds a system message).
+func (s *Store) Abort(sessionID, reason string) error {
+	return s.AppendMessage(sessionID, Message{
+		Role:      RoleSystem,
+		Type:      MessageTypeText,
+		Content:   "[ABORTED] " + reason,
+		CreatedAt: time.Now().UTC(),
+	})
+}
+
+// Reset clears messages and resets UpdatedAt (like Kill but for restart flows).
+func (s *Store) Reset(sessionID string) error {
+	return s.Kill(sessionID)
+}
+
+// Cleanup removes sessions that have not been updated within maxAge.
+func (s *Store) Cleanup(maxAge time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for id, sess := range s.sessions {
+		if sess.UpdatedAt.Before(cutoff) {
+			delete(s.sessions, id)
+			removed++
+		}
+	}
+	if removed > 0 {
+		return removed, s.saveLocked()
+	}
+	return 0, nil
+}
+
 // Compact removes messages older than keepN from the start of the session.
 // If keepN >= len(messages) nothing is removed.  Returns number removed.
 func (s *Store) Compact(sessionID string, keepN int) (int, error) {

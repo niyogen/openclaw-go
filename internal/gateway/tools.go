@@ -11,9 +11,31 @@ import (
 	"time"
 )
 
+// ToolParameter describes one parameter in a tool's JSON Schema.
+type ToolParameter struct {
+	Type        string         `json:"type"`
+	Description string         `json:"description,omitempty"`
+	Enum        []string       `json:"enum,omitempty"`
+	Properties  map[string]any `json:"properties,omitempty"`
+	Required    []string       `json:"required,omitempty"`
+}
+
+// ToolParameters is the JSON Schema for a tool's input arguments.
+type ToolParameters struct {
+	Type       string                   `json:"type"` // "object"
+	Properties map[string]ToolParameter `json:"properties,omitempty"`
+	Required   []string                 `json:"required,omitempty"`
+}
+
 type Tool struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  *ToolParameters `json:"parameters,omitempty"`
+}
+
+type ToolWithSchema struct {
+	Type     string `json:"type"` // "function"
+	Function Tool   `json:"function"`
 }
 
 type ToolInvokeRequest struct {
@@ -123,6 +145,13 @@ func (s *Server) initTools() {
 		Tool{
 			Name:        "echo",
 			Description: "Echo back provided text argument",
+			Parameters: &ToolParameters{
+				Type: "object",
+				Properties: map[string]ToolParameter{
+					"text": {Type: "string", Description: "Text to echo back"},
+				},
+				Required: []string{"text"},
+			},
 		},
 		func(_ context.Context, args map[string]any) (any, error) {
 			text, _ := args["text"].(string)
@@ -143,7 +172,15 @@ func (s *Server) initTools() {
 	s.tools.Register(
 		Tool{
 			Name:        "sandbox.run",
-			Description: "Run a shell command or script inside a Docker sandbox (network=none, read-only, resource-limited). Args: script (string), image (string, optional).",
+			Description: "Run a shell command or script inside a Docker sandbox (network=none, resource-limited).",
+			Parameters: &ToolParameters{
+				Type: "object",
+				Properties: map[string]ToolParameter{
+					"script": {Type: "string", Description: "Shell script to execute"},
+					"image":  {Type: "string", Description: "Docker image (default: alpine:3.19)"},
+				},
+				Required: []string{"script"},
+			},
 		},
 		func(ctx context.Context, args map[string]any) (any, error) {
 			return sandboxRunTool(ctx, args)

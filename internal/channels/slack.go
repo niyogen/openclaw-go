@@ -53,8 +53,43 @@ func (s *SlackChannel) Send(ctx context.Context, message OutboundMessage) error 
 	if strings.TrimSpace(message.ThreadID) != "" {
 		payload["thread_ts"] = message.ThreadID
 	}
+	if message.Ephemeral {
+		payload["response_type"] = "ephemeral"
+	}
+	// Build Block Kit blocks for attachments + buttons.
+	var blocks []map[string]any
+	blocks = append(blocks, map[string]any{
+		"type": "section",
+		"text": map[string]string{"type": "mrkdwn", "text": message.Message},
+	})
 	if strings.TrimSpace(message.MediaURL) != "" {
-		payload["attachments"] = []map[string]string{{"image_url": message.MediaURL}}
+		blocks = append(blocks, map[string]any{
+			"type":      "image",
+			"image_url": message.MediaURL,
+			"alt_text":  "image",
+		})
+	}
+	if len(message.Buttons) > 0 {
+		elements := make([]map[string]any, 0, len(message.Buttons))
+		for _, btn := range message.Buttons {
+			style := strings.TrimSpace(btn.Style)
+			elem := map[string]any{
+				"type":  "button",
+				"text":  map[string]string{"type": "plain_text", "text": btn.Label},
+				"value": btn.Value,
+			}
+			if style != "" && style != "default" {
+				elem["style"] = style
+			}
+			elements = append(elements, elem)
+		}
+		blocks = append(blocks, map[string]any{
+			"type":     "actions",
+			"elements": elements,
+		})
+	}
+	if len(blocks) > 1 || len(message.Buttons) > 0 {
+		payload["blocks"] = blocks
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -78,6 +113,29 @@ func (s *SlackChannel) Send(ctx context.Context, message OutboundMessage) error 
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("slack chat.postMessage returned %d", resp.StatusCode)
+	}
+
+	// Post reactions if requested.
+	for _, reaction := range message.Reactions {
+		if strings.TrimSpace(reaction.Emoji) == "" {
+			continue
+		}
+		reactionPayload, _ := json.Marshal(map[string]string{
+			"channel":   targetChannel,
+			"name":      reaction.Emoji,
+			"timestamp": reaction.MessageID,
+		})
+		reactionReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			"https://slack.com/api/reactions.add", bytes.NewReader(reactionPayload))
+		if err != nil {
+			continue
+		}
+		reactionReq.Header.Set("Content-Type", "application/json")
+		reactionReq.Header.Set("Authorization", "Bearer "+s.botToken)
+		resp2, err := s.client.Do(reactionReq)
+		if err == nil {
+			resp2.Body.Close()
+		}
 	}
 	return nil
 }

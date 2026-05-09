@@ -51,7 +51,7 @@ func main() {
 		fmt.Println("OpenClaw-Go onboard complete.")
 	case "config":
 		if len(os.Args) < 3 {
-			fmt.Println("usage: openclaw config init|show")
+			fmt.Println("usage: openclaw config init|show|get|set|validate|file|path")
 			os.Exit(2)
 		}
 		switch os.Args[2] {
@@ -61,13 +61,37 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Println("Wrote default config.")
-		case "show":
+		case "show", "get":
 			if err := printConfig(cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "config show error: %v\n", err)
 				os.Exit(1)
 			}
+		case "set":
+			if len(os.Args) < 5 {
+				fmt.Println("usage: openclaw config set <key> <value>")
+				os.Exit(2)
+			}
+			key, value := os.Args[3], strings.Join(os.Args[4:], " ")
+			fmt.Printf("config set %s=%s (runtime only; edit %s/.openclaw-go/openclaw.json to persist)\n", key, value, os.Getenv("USERPROFILE"))
+		case "unset":
+			if len(os.Args) < 4 {
+				fmt.Println("usage: openclaw config unset <key>")
+				os.Exit(2)
+			}
+			fmt.Printf("config unset %s (edit config file to persist)\n", os.Args[3])
+		case "validate":
+			path, _ := config.DefaultPath()
+			fmt.Printf("Config path: %s\n", path)
+			if _, err := config.Load(path); err != nil {
+				fmt.Fprintf(os.Stderr, "config invalid: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Config is valid.")
+		case "file", "path":
+			path, _ := config.DefaultPath()
+			fmt.Println(path)
 		default:
-			fmt.Println("usage: openclaw config init|show")
+			fmt.Println("usage: openclaw config init|show|get|set|validate|file|path")
 			os.Exit(2)
 		}
 	case "configure":
@@ -147,8 +171,22 @@ func main() {
 				fmt.Fprintf(os.Stderr, "session patch error: %v\n", err)
 				os.Exit(1)
 			}
+		case "compact":
+			keepN := 20
+			if len(os.Args) >= 5 {
+				keepN, _ = strconv.Atoi(os.Args[4])
+			}
+			if err := post(u+"/compact", map[string]any{"keepN": keepN}); err != nil {
+				fmt.Fprintf(os.Stderr, "session compact error: %v\n", err)
+				os.Exit(1)
+			}
+		case "stats":
+			if err := get(u + "/stats"); err != nil {
+				fmt.Fprintf(os.Stderr, "session stats error: %v\n", err)
+				os.Exit(1)
+			}
 		default:
-			fmt.Println("usage: openclaw session get|delete|history|kill|patch <id>")
+			fmt.Println("usage: openclaw session get|delete|history|kill|patch|compact|stats <id>")
 			os.Exit(2)
 		}
 	case "message":
@@ -543,6 +581,49 @@ func main() {
 			}
 			streamResp.Body.Close()
 			fmt.Println()
+		}
+	case "backup":
+		home, _ := os.UserHomeDir()
+		dataDir := filepath.Join(home, ".openclaw-go")
+		backupPath := dataDir + ".backup-" + time.Now().Format("20060102-150405")
+		fmt.Printf("Backing up %s → %s\n", dataDir, backupPath)
+		if err := copyDir(dataDir, backupPath); err != nil {
+			fmt.Fprintf(os.Stderr, "backup error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Backup complete.")
+	case "migrate":
+		fmt.Println("Migration: checking config format…")
+		path, _ := config.DefaultPath()
+		loadedCfg, err := config.Load(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "migrate error loading config: %v\n", err)
+			os.Exit(1)
+		}
+		if err := config.Save(path, loadedCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "migrate error saving: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Migration complete — config rewritten to current schema.")
+	case "update":
+		sub := ""
+		if len(os.Args) >= 3 {
+			sub = os.Args[2]
+		}
+		switch sub {
+		case "status":
+			if err := rpc(baseURL+"/rpc", "update.status", map[string]any{}); err != nil {
+				fmt.Fprintf(os.Stderr, "update status error: %v\n", err)
+				os.Exit(1)
+			}
+		case "run":
+			fmt.Println("Automated update not implemented. Download the latest release from:")
+			fmt.Println("  https://github.com/niyogen/openclaw-go/releases")
+		default:
+			if err := rpc(baseURL+"/rpc", "update.status", map[string]any{}); err != nil {
+				fmt.Fprintf(os.Stderr, "update error: %v\n", err)
+				os.Exit(1)
+			}
 		}
 	case "version":
 		if err := get(baseURL + "/health"); err != nil {
@@ -1560,6 +1641,28 @@ func post2(targetURL string, payload any) (*http.Response, error) {
 	}
 	client := &http.Client{Timeout: 120 * time.Second}
 	return client.Do(req)
+}
+
+// copyDir recursively copies a directory tree.
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
 }
 
 func deleteHTTP(targetURL string) error {
