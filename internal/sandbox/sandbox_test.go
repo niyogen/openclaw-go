@@ -40,8 +40,10 @@ func TestRunDockerUnavailable(t *testing.T) {
 }
 
 func TestRunWithDocker(t *testing.T) {
+	// IsAvailable now checks for Linux container support, so on Windows CI
+	// runners using Windows-container mode, this will return false.
 	if !IsAvailable(context.Background()) {
-		t.Skip("Docker not available")
+		t.Skip("Docker with Linux containers not available")
 	}
 	opts := DefaultOptions()
 	opts.ReadOnly = false // alpine needs /tmp writable for some ops
@@ -60,7 +62,7 @@ func TestRunWithDocker(t *testing.T) {
 
 func TestRunScriptWithDocker(t *testing.T) {
 	if !IsAvailable(context.Background()) {
-		t.Skip("Docker not available")
+		t.Skip("Docker with Linux containers not available")
 	}
 	opts := DefaultOptions()
 	opts.ReadOnly = false

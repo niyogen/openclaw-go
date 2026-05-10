@@ -146,9 +146,23 @@ func checkDocker(ctx context.Context) error {
 	return nil
 }
 
-// IsAvailable returns true if Docker is reachable.
+// IsAvailable returns true if Docker is reachable AND can run Linux containers.
+// On Windows, Docker may be running in Windows-container mode which cannot
+// run Linux images like alpine — in that case we return false.
 func IsAvailable(ctx context.Context) bool {
-	return checkDocker(ctx) == nil
+	if checkDocker(ctx) != nil {
+		return false
+	}
+	// Verify Linux container support by checking the OS type reported by Docker.
+	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(checkCtx, "docker", "info", "--format", "{{.OSType}}")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	osType := strings.TrimSpace(strings.ToLower(string(out)))
+	return osType == "linux"
 }
 
 // RunScript is a convenience wrapper that executes a shell script string

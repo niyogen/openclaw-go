@@ -82,29 +82,30 @@ func New(
 	s.rateLimiter = NewRateLimiter(120, time.Minute)
 	s.bus = NewEventBus()
 	s.shutdownFn = func() {} // replaced by Run()
+	// Use filepath.Join for all paths to ensure correct separators on Windows.
 	s.topo, _ = topology.New(filepath.Join(dataDir, "topology.json"))
 	s.workspace, _ = agents.NewWorkspace(filepath.Join(dataDir, "workspace.json"))
 	if s.topo == nil {
-		s.topo, _ = topology.New(os.TempDir() + "/openclaw-go-topology.json")
+		s.topo, _ = topology.New(filepath.Join(os.TempDir(), "openclaw-go-topology.json"))
 	}
 	if s.workspace == nil {
-		s.workspace, _ = agents.NewWorkspace(os.TempDir() + "/openclaw-go-workspace.json")
+		s.workspace, _ = agents.NewWorkspace(filepath.Join(os.TempDir(), "openclaw-go-workspace.json"))
 	}
-	s.logs, _ = logstore.New(dataDir + "/logs.json")
-	s.cron, _ = cronstore.New(dataDir + "/cron.json")
-	s.hooks, _ = hookstore.New(dataDir + "/hooks.json")
-	s.secrets, _ = secretstore.New(dataDir + "/secrets.json")
+	s.logs, _ = logstore.New(filepath.Join(dataDir, "logs.json"))
+	s.cron, _ = cronstore.New(filepath.Join(dataDir, "cron.json"))
+	s.hooks, _ = hookstore.New(filepath.Join(dataDir, "hooks.json"))
+	s.secrets, _ = secretstore.New(filepath.Join(dataDir, "secrets.json"))
 	if s.logs == nil {
-		s.logs, _ = logstore.New(os.TempDir() + "/openclaw-go-logs.json")
+		s.logs, _ = logstore.New(filepath.Join(os.TempDir(), "openclaw-go-logs.json"))
 	}
 	if s.cron == nil {
-		s.cron, _ = cronstore.New(os.TempDir() + "/openclaw-go-cron.json")
+		s.cron, _ = cronstore.New(filepath.Join(os.TempDir(), "openclaw-go-cron.json"))
 	}
 	if s.hooks == nil {
-		s.hooks, _ = hookstore.New(os.TempDir() + "/openclaw-go-hooks.json")
+		s.hooks, _ = hookstore.New(filepath.Join(os.TempDir(), "openclaw-go-hooks.json"))
 	}
 	if s.secrets == nil {
-		s.secrets, _ = secretstore.New(os.TempDir() + "/openclaw-go-secrets.json")
+		s.secrets, _ = secretstore.New(filepath.Join(os.TempDir(), "openclaw-go-secrets.json"))
 	}
 	s.initTools()
 	s.registerRoutes()
