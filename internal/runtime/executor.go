@@ -138,7 +138,7 @@ func (e *Executor) Run(ctx context.Context, opts RunOptions) RunResult {
 		for _, tc := range toolCalls {
 			parsedArgs := tc.Function.ParsedArgs()
 			// If argument parsing failed, record the error without invoking the tool.
-			if errMsg, bad := parsedArgs["_parseError"]; bad {
+			if errMsg, bad := parsedArgs[argsParseErrorKey]; bad {
 				if opts.OnToolCall != nil {
 					opts.OnToolCall(tc.Function.Name, parsedArgs)
 				}

@@ -146,14 +146,34 @@ func (s *Store) Get(sessionID string) (Session, bool) {
 	return deepCopySession(item), true
 }
 
-// deepCopySession returns a full copy of sess with its Messages slice
-// independently allocated so callers cannot race against store mutations.
+// deepCopyMessages returns an independently allocated copy of a message slice
+// including nested Attachments and ToolCall pointers.
+func deepCopyMessages(msgs []Message) []Message {
+	if len(msgs) == 0 {
+		return nil
+	}
+	out := make([]Message, len(msgs))
+	for i, m := range msgs {
+		cm := m
+		if len(m.Attachments) > 0 {
+			cm.Attachments = make([]Attachment, len(m.Attachments))
+			copy(cm.Attachments, m.Attachments)
+		}
+		if m.ToolCall != nil {
+			tc := *m.ToolCall
+			cm.ToolCall = &tc
+		}
+		out[i] = cm
+	}
+	return out
+}
+
+// deepCopySession returns a full copy of sess with every mutable slice and
+// pointer independently allocated so callers cannot race against store
+// mutations (AppendMessage, Patch, etc.).
 func deepCopySession(sess *Session) Session {
 	cp := *sess
-	if len(sess.Messages) > 0 {
-		cp.Messages = make([]Message, len(sess.Messages))
-		copy(cp.Messages, sess.Messages)
-	}
+	cp.Messages = deepCopyMessages(sess.Messages)
 	return cp
 }
 
@@ -178,9 +198,7 @@ func (s *Store) History(sessionID string) ([]Message, bool) {
 	if !ok {
 		return nil, false
 	}
-	out := make([]Message, len(sess.Messages))
-	copy(out, sess.Messages)
-	return out, true
+	return deepCopyMessages(sess.Messages), true
 }
 
 // Patch applies a series of message replacements to a session.
@@ -230,9 +248,7 @@ func (s *Store) Preview(sessionID string, n int) ([]Message, bool) {
 	if n > 0 && len(msgs) > n {
 		msgs = msgs[len(msgs)-n:]
 	}
-	out := make([]Message, len(msgs))
-	copy(out, msgs)
-	return out, true
+	return deepCopyMessages(msgs), true
 }
 
 // Abort marks a session as aborted (adds a system message).

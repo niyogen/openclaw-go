@@ -19,16 +19,22 @@ type ToolCallFunc struct {
 	Arguments string `json:"arguments"` // JSON-encoded map
 }
 
+// argsParseErrorKey is a sentinel key injected into the parsed-args map when
+// the model-supplied arguments JSON is malformed.  It uses the zero-width
+// joiner so it cannot appear in any real JSON key produced by a model.
+const argsParseErrorKey = "\u200b_openclaw_parse_error"
+
 // ParsedArgs deserialises the JSON arguments string into a map.
-// If the arguments string is malformed the error is returned so callers
-// can reject the tool call rather than silently invoking it with empty args.
+// If the arguments string is malformed the returned map contains
+// argsParseErrorKey so callers can reject the tool call instead of
+// silently invoking it with empty arguments.
 func (f ToolCallFunc) ParsedArgs() map[string]any {
 	if strings.TrimSpace(f.Arguments) == "" {
 		return map[string]any{}
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(f.Arguments), &m); err != nil {
-		return map[string]any{"_parseError": err.Error()}
+		return map[string]any{argsParseErrorKey: err.Error()}
 	}
 	return m
 }
