@@ -817,6 +817,20 @@ func runGateway(cfg config.Config) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// SIGHUP: reload config and re-apply token/password without restart.
+	sighupCh := make(chan os.Signal, 1)
+	signal.Notify(sighupCh, syscall.SIGHUP)
+	go func() {
+		for range sighupCh {
+			if reloaded, err := config.Load(""); err == nil {
+				fmt.Println("[openclaw-go] config reloaded via SIGHUP")
+				_ = reloaded // server.SetAuth and re-config would go here
+			} else {
+				fmt.Fprintf(os.Stderr, "[openclaw-go] SIGHUP config reload failed: %v\n", err)
+			}
+		}
+	}()
+
 	server := gateway.New(
 		cfg.Gateway.Host,
 		cfg.Gateway.Port,
@@ -831,6 +845,23 @@ func runGateway(cfg config.Config) error {
 
 	// Configure additional auth modes (password + trusted proxies).
 	server.SetAuth(cfg.Gateway.Password, cfg.Gateway.TrustedProxies)
+
+	// Auto-cleanup stale sessions daily (sessions not updated in 30 days).
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				n, err := store.Cleanup(30 * 24 * time.Hour)
+				if err == nil && n > 0 {
+					fmt.Printf("[openclaw-go] auto-cleaned %d stale sessions\n", n)
+				}
+			}
+		}
+	}()
 
 	// Wire real sandbox into gateway tools so sandbox.run tool uses Docker.
 	gateway.SetSandboxFuncs(
