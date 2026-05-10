@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -111,7 +112,9 @@ func (t *TelegramChannel) BuildWebhookHandler(
 		}
 		// Answer callback query to dismiss the loading indicator before dispatching.
 		if update.CallbackQuery != nil && update.CallbackQuery.ID != "" {
-			_ = t.answerCallbackQuery(r.Context(), update.CallbackQuery.ID)
+			if err := t.answerCallbackQuery(r.Context(), update.CallbackQuery.ID); err != nil {
+				fmt.Fprintf(os.Stderr, "[telegram] answerCallbackQuery failed: %v\n", err)
+			}
 		}
 		for _, inbound := range messagesFromUpdate(update) {
 			_ = handler(r.Context(), inbound)
@@ -375,7 +378,9 @@ func (p *TelegramPoller) pollOnce(
 		}
 		// Answer callback queries immediately to dismiss loading indicators.
 		if item.CallbackQuery != nil && item.CallbackQuery.ID != "" {
-			_ = telegramAnswerCallbackQuery(ctx, p.client, p.botToken, item.CallbackQuery.ID)
+			if err := telegramAnswerCallbackQuery(ctx, p.client, p.botToken, item.CallbackQuery.ID); err != nil {
+				fmt.Fprintf(os.Stderr, "[telegram] answerCallbackQuery failed: %v\n", err)
+			}
 		}
 		for _, inbound := range messagesFromUpdate(item) {
 			_ = handler(ctx, inbound)

@@ -42,16 +42,17 @@ func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	// Seed with recent entries.
+	// Subscribe BEFORE seeding to avoid losing entries that arrive in the
+	// window between List() returning and the subscription becoming active.
+	evCh, unsub := s.bus.Subscribe("")
+	defer unsub()
+
+	// Seed with recent entries (oldest→newest).
 	for _, entry := range s.logs.List(filterLevel, filterComponent, 20) {
 		raw, _ := json.Marshal(entry)
 		fmt.Fprintf(w, "data: %s\n\n", raw)
 	}
 	flusher.Flush()
-
-	// Subscribe to new log events.
-	evCh, unsub := s.bus.Subscribe("")
-	defer unsub()
 
 	for {
 		select {

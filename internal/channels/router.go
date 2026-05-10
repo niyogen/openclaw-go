@@ -29,7 +29,14 @@ func NewRouterWithRetries(maxRetries int) *Router {
 }
 
 // SetMaxRetries configures the number of retry attempts after an initial failure.
+// Values above 10 are clamped to prevent absurdly long backoff chains.
 func (r *Router) SetMaxRetries(n int) {
+	if n < 0 {
+		n = 0
+	}
+	if n > 10 {
+		n = 10
+	}
 	r.maxRetries = n
 }
 
@@ -64,7 +71,12 @@ func (r *Router) Dispatch(ctx context.Context, message OutboundMessage) error {
 	var lastErr error
 	for attempt := 0; attempt <= r.maxRetries; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(200<<uint(attempt-1)) * time.Millisecond
+			// Cap the shift to 5 before multiplying to avoid integer overflow.
+			shift := uint(attempt - 1)
+			if shift > 5 {
+				shift = 5
+			}
+			backoff := time.Duration(200<<shift) * time.Millisecond
 			if backoff > 5*time.Second {
 				backoff = 5 * time.Second
 			}

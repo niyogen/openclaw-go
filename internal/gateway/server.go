@@ -2232,7 +2232,7 @@ func (s *Server) dispatchRPC(
 		if len(params) > 0 {
 			_ = json.Unmarshal(params, &p)
 		}
-		s.logs.Append("info", "system", "system-event: "+p.Event, nil)
+		s.appendLog("info", "system", "system-event: "+p.Event, nil)
 		return map[string]any{"ok": true, "event": p.Event}, nil
 
 	// ── sessions advanced ─────────────────────────────────────────────────
