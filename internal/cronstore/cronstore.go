@@ -280,7 +280,7 @@ func (s *Store) load() error {
 	}
 	var jobs []Job
 	if err := json.Unmarshal(raw, &jobs); err != nil {
-		return nil
+		return fmt.Errorf("cronstore: corrupt data file %s: %w", s.path, err)
 	}
 	for i := range jobs {
 		j := jobs[i]

@@ -87,6 +87,8 @@ func (r *OpenAIRunner) StreamReply(ctx context.Context, turn Turn, out chan<- St
 
 // buildMessages factors out the history→messages conversion shared by
 // GenerateReply and StreamReply.
+// turn.Message is only appended when non-empty; tool-loop continuation turns
+// have an empty Message and rely solely on history to carry context.
 func buildMessages(turn Turn) []openAIMessage {
 	msgs := make([]openAIMessage, 0, len(turn.History)+1)
 	for _, item := range turn.History {
@@ -95,6 +97,8 @@ func buildMessages(turn Turn) []openAIMessage {
 		}
 		msgs = append(msgs, openAIMessage(item))
 	}
-	msgs = append(msgs, openAIMessage{Role: "user", Content: turn.Message})
+	if strings.TrimSpace(turn.Message) != "" {
+		msgs = append(msgs, openAIMessage{Role: "user", Content: turn.Message})
+	}
 	return msgs
 }

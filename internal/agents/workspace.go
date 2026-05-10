@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"openclaw-go/internal/fileutil"
 )
 
 // AgentProfile is a named agent configuration.
@@ -187,17 +189,23 @@ func (w *Workspace) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(w.path, raw, 0o644)
+	return fileutil.WriteFile(w.path, raw, 0o644)
 }
 
 func (w *Workspace) load() error {
 	raw, err := os.ReadFile(w.path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(raw) == 0 {
 		return nil
 	}
 	var state workspaceState
 	if err := json.Unmarshal(raw, &state); err != nil {
-		return nil
+		return fmt.Errorf("workspace: corrupt data file %s: %w", w.path, err)
 	}
 	for _, a := range state.Agents {
 		w.agents[a.ID] = a

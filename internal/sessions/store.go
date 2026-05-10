@@ -276,9 +276,10 @@ func (s *Store) Stats(sessionID string) (map[string]any, bool) {
 	}
 	userCount, assistantCount := 0, 0
 	for _, m := range sess.Messages {
-		if m.Role == RoleUser {
+		switch m.Role {
+		case RoleUser:
 			userCount++
-		} else {
+		case RoleAssistant:
 			assistantCount++
 		}
 	}

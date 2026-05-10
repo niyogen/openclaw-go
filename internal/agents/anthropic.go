@@ -136,14 +136,23 @@ func buildAnthropicMessages(turn Turn) []anthropicMessage {
 			}
 		}
 	}
-	currentMsg := turn.Message
+	// Append the current user message, absorbing any remaining system context.
+	// Skip when empty (tool-loop continuation turns carry context via history).
+	currentMsg := strings.TrimSpace(turn.Message)
 	if len(pendingSystem) > 0 {
-		currentMsg = strings.Join(pendingSystem, "\n") + "\n" + currentMsg
+		sysPrefix := strings.Join(pendingSystem, "\n")
+		if currentMsg != "" {
+			currentMsg = sysPrefix + "\n" + currentMsg
+		} else {
+			currentMsg = sysPrefix
+		}
 	}
-	if len(messages) > 0 && messages[len(messages)-1].Role == "user" {
-		messages[len(messages)-1].Content += "\n" + currentMsg
-	} else {
-		messages = append(messages, anthropicMessage{Role: "user", Content: currentMsg})
+	if currentMsg != "" {
+		if len(messages) > 0 && messages[len(messages)-1].Role == "user" {
+			messages[len(messages)-1].Content += "\n" + currentMsg
+		} else {
+			messages = append(messages, anthropicMessage{Role: "user", Content: currentMsg})
+		}
 	}
 	return messages
 }

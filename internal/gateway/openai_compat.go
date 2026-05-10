@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -177,15 +178,15 @@ func pseudoEmbedding(text string, dims int) []float64 {
 	for i, b := range []byte(text) {
 		vec[i%dims] += float64(b) / 255.0
 	}
-	// L2-normalise.
+	// L2-normalise: divide each element by ‖v‖ = sqrt(sum of squares).
 	norm := 0.0
 	for _, v := range vec {
 		norm += v * v
 	}
 	if norm > 0 {
-		norm = 1.0 / (norm * norm) // approximate
+		scale := 1.0 / math.Sqrt(norm)
 		for i := range vec {
-			vec[i] *= norm
+			vec[i] *= scale
 		}
 	}
 	return vec

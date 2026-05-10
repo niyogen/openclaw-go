@@ -51,6 +51,7 @@ type Server struct {
 	topo           *topology.Store
 	workspace      *agents.Workspace
 	mux            *http.ServeMux
+	startedAt      time.Time
 }
 
 func New(
@@ -75,6 +76,7 @@ func New(
 		route:          router,
 		registry:       registry,
 		mux:            mux,
+		startedAt:      time.Now().UTC(),
 	}
 	if s.route == nil {
 		s.route = channels.NewRouter()
@@ -687,7 +689,8 @@ func (s *Server) gatewayStatus() map[string]any {
 		"service":     "openclaw-go-gateway",
 		"version":     Version,
 		"address":     s.Address(),
-		"authEnabled": strings.TrimSpace(s.authToken) != "",
+		"authEnabled": strings.TrimSpace(s.authToken) != "" || strings.TrimSpace(s.password) != "",
+		"uptime":      time.Since(s.startedAt).String(),
 		"time":        time.Now().UTC(),
 	}
 }
@@ -761,6 +764,8 @@ func (s *Server) dispatchRPC(
 		if err := s.store.Kill(p.SessionID); err != nil {
 			return nil, &rpcError{Code: -32001, Message: err.Error()}
 		}
+		s.bus.Publish(GatewayEvent{Type: EventSessionKilled, SessionID: p.SessionID})
+		s.logs.Append(logstore.LevelInfo, "sessions", "session killed: "+p.SessionID, nil)
 		return map[string]any{"ok": true, "killed": p.SessionID}, nil
 	case "sessions.delete":
 		var p sessionIDParams
@@ -1297,7 +1302,7 @@ func (s *Server) dispatchRPC(
 	case "diagnostics.stability":
 		return map[string]any{
 			"ok":      true,
-			"uptime":  time.Since(time.Now()).String(),
+			"uptime":  time.Since(s.startedAt).String(),
 			"version": Version,
 		}, nil
 
@@ -1361,8 +1366,14 @@ func (s *Server) dispatchRPC(
 	// ── send (top-level alias) ────────────────────────────────────────────
 	case "send":
 		var req messageRequest
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &req)
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if strings.TrimSpace(req.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
 		}
 		if req.Channel == "" {
 			req.Channel = "cli"
@@ -1387,7 +1398,7 @@ func (s *Server) dispatchRPC(
 		}
 		msgs, ok := s.store.Preview(p.SessionID, p.Limit)
 		if !ok {
-			return map[string]any{"history": []any{}}, nil
+			return nil, &rpcError{Code: -32001, Message: "session not found"}
 		}
 		return map[string]any{"history": msgs, "sessionId": p.SessionID}, nil
 	case "chat.abort":
@@ -1577,7 +1588,9 @@ func (s *Server) dispatchRPC(
 		if len(params) == 0 {
 			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
-		_ = json.Unmarshal(params, &profile)
+		if err := json.Unmarshal(params, &profile); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
 		if err := s.workspace.Update(profile); err != nil {
 			return nil, &rpcError{Code: -32001, Message: err.Error()}
 		}
