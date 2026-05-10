@@ -59,6 +59,7 @@ type harness struct {
 	token  string
 	server *gateway.Server
 	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func newHarness(t *testing.T, authToken string) *harness {
@@ -106,20 +107,39 @@ func newHarness(t *testing.T, authToken string) *harness {
 		dir,
 	)
 
-	go func() { _ = srv2.Run(ctx) }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = srv2.Run(ctx)
+	}()
 	time.Sleep(50 * time.Millisecond) // let it bind
 
 	_ = srv // unused; srv2 is the live one
 
-	return &harness{
+	h := &harness{
 		base:   fmt.Sprintf("http://127.0.0.1:%d", port),
 		token:  authToken,
 		server: srv2,
 		cancel: cancel,
+		done:   done,
 	}
+
+	// Registered after t.TempDir(), so runs before the TempDir RemoveAll in
+	// LIFO cleanup order. This guarantees the server goroutine (and any
+	// in-flight sessions.json writes) have fully exited before the temp
+	// directory is removed, preventing the "directory not empty" race.
+	t.Cleanup(h.close)
+
+	return h
 }
 
-func (h *harness) close() { h.cancel() }
+func (h *harness) close() {
+	h.cancel()
+	select {
+	case <-h.done:
+	case <-time.After(5 * time.Second):
+	}
+}
 
 func (h *harness) headers() http.Header {
 	hdr := http.Header{}
