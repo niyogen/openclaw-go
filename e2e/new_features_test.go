@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -396,12 +397,14 @@ func TestE2E_SandboxRunWithDocker(t *testing.T) {
 	if !sandbox.IsAvailable(context.Background()) {
 		t.Skip("Docker not available")
 	}
-	h := newHarness(t, "")
-	defer h.close()
-	// Wire real sandbox.
+
+	// Set real sandbox functions scoped to this test, then restore defaults after.
+	// Using SetSandboxFuncs is now protected by a RWMutex so it's race-safe.
 	gateway.SetSandboxFuncs(
 		func(ctx context.Context, script string, _ interface{}) (*gateway.SandboxResult, error) {
-			r, err := sandbox.RunScript(ctx, script, sandbox.DefaultOptions())
+			opts := sandbox.DefaultOptions()
+			opts.ReadOnly = false
+			r, err := sandbox.RunScript(ctx, script, opts)
 			if err != nil {
 				return nil, err
 			}
@@ -409,6 +412,19 @@ func TestE2E_SandboxRunWithDocker(t *testing.T) {
 		},
 		sandbox.IsAvailable,
 	)
+	// Restore to disabled defaults when the test is done.
+	t.Cleanup(func() {
+		gateway.SetSandboxFuncs(
+			func(_ context.Context, script string, _ interface{}) (*gateway.SandboxResult, error) {
+				return nil, fmt.Errorf("sandbox not configured")
+			},
+			func(_ context.Context) bool { return false },
+		)
+	})
+
+	h := newHarness(t, "")
+	defer h.close()
+
 	resp := h.post(t, "/tools/invoke", map[string]any{
 		"name":      "sandbox.run",
 		"arguments": map[string]any{"script": "echo hello-from-sandbox"},

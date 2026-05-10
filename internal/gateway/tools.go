@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -183,7 +184,7 @@ func (s *Server) initTools() {
 			},
 		},
 		func(ctx context.Context, args map[string]any) (any, error) {
-			return sandboxRunTool(ctx, args)
+			return callSandboxRun(ctx, args)
 		},
 	)
 
@@ -193,8 +194,7 @@ func (s *Server) initTools() {
 			Description: "Check whether Docker is available for sandbox execution.",
 		},
 		func(ctx context.Context, _ map[string]any) (any, error) {
-			available := sandboxIsAvailable(ctx)
-			return map[string]any{"available": available}, nil
+			return map[string]any{"available": callSandboxAvailable(ctx)}, nil
 		},
 	)
 }
@@ -223,29 +223,46 @@ type SandboxResult struct {
 	ExitCode int    `json:"exitCode"`
 }
 
-// sandboxRunTool and sandboxIsAvailable are thin wrappers; replaced by
-// SetSandboxImpl when the real sandbox package is available.
+// sandboxMu protects sandboxRunTool and sandboxIsAvailable against concurrent
+// reads (from tool handler goroutines) and writes (from SetSandboxFuncs).
+var sandboxMu sync.RWMutex
+
 var sandboxRunTool = func(ctx context.Context, args map[string]any) (any, error) {
 	script, _ := args["script"].(string)
 	if strings.TrimSpace(script) == "" {
 		return nil, fmt.Errorf("script argument is required")
 	}
 	return map[string]any{
-		"note":   "sandbox.run requires Docker; call SetSandboxImpl to enable",
+		"note":   "sandbox.run requires Docker; call SetSandboxFuncs to enable",
 		"script": script,
 	}, nil
 }
 
 var sandboxIsAvailable = func(_ context.Context) bool { return false }
 
+// callSandboxRun reads sandboxRunTool under a read-lock.
+func callSandboxRun(ctx context.Context, args map[string]any) (any, error) {
+	sandboxMu.RLock()
+	fn := sandboxRunTool
+	sandboxMu.RUnlock()
+	return fn(ctx, args)
+}
+
+// callSandboxAvailable reads sandboxIsAvailable under a read-lock.
+func callSandboxAvailable(ctx context.Context) bool {
+	sandboxMu.RLock()
+	fn := sandboxIsAvailable
+	sandboxMu.RUnlock()
+	return fn(ctx)
+}
+
 // SetSandboxFuncs wires the real sandbox implementation into the gateway tool
-// registry.  Call this from main after the gateway is constructed.
+// registry.  Safe to call concurrently with tool invocations.
 func SetSandboxFuncs(
 	runFn func(ctx context.Context, script string, opts interface{}) (*SandboxResult, error),
 	availFn func(ctx context.Context) bool,
 ) {
-	sandboxIsAvailable = availFn
-	sandboxRunTool = func(ctx context.Context, args map[string]any) (any, error) {
+	newRunTool := func(ctx context.Context, args map[string]any) (any, error) {
 		script, _ := args["script"].(string)
 		if strings.TrimSpace(script) == "" {
 			return nil, fmt.Errorf("script argument is required")
@@ -259,4 +276,8 @@ func SetSandboxFuncs(
 		}
 		return result, nil
 	}
+	sandboxMu.Lock()
+	sandboxRunTool = newRunTool
+	sandboxIsAvailable = availFn
+	sandboxMu.Unlock()
 }

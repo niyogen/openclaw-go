@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -136,10 +137,13 @@ func (s *Store) ExecuteJob(ctx context.Context, job Job) Run {
 	}
 	jobCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(jobCtx, "sh", "-c", job.Command) //nolint:gosec
-	if cmd.Path == "" {
-		// sh not available (Windows) — use cmd /C
+
+	// Choose shell based on OS: sh on Unix, cmd on Windows.
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(jobCtx, "cmd", "/C", job.Command) //nolint:gosec
+	} else {
+		cmd = exec.CommandContext(jobCtx, "sh", "-c", job.Command) //nolint:gosec
 	}
 	var out bytes.Buffer
 	cmd.Stdout = &out
