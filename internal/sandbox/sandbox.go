@@ -64,9 +64,9 @@ func DefaultOptions() Options {
 }
 
 // Run executes cmd inside a throwaway Docker container and returns stdout/stderr.
-// If Docker is not available it returns ErrDockerUnavailable.
+// If Docker is not available or does not support Linux containers it returns ErrDockerUnavailable.
 func Run(ctx context.Context, opts Options) (*Result, error) {
-	if err := checkDocker(ctx); err != nil {
+	if !IsAvailable(ctx) {
 		return nil, ErrDockerUnavailable
 	}
 
