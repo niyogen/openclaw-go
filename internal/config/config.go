@@ -11,13 +11,15 @@ import (
 )
 
 type GatewayConfig struct {
-	Host           string   `json:"host"`
-	Port           int      `json:"port"`
-	AuthToken      string   `json:"authToken"`
-	Password       string   `json:"password"` // HTTP Basic password (alternative to token)
-	AllowedOrigins []string `json:"allowedOrigins"`
-	PluginsDir     string   `json:"pluginsDir"`
-	TrustedProxies []string `json:"trustedProxies"` // IPs/CIDRs that may set X-Forwarded-For
+	Host            string   `json:"host"`
+	Port            int      `json:"port"`
+	AuthToken       string   `json:"authToken"`
+	Password        string   `json:"password"` // HTTP Basic password (alternative to token)
+	AllowedOrigins  []string `json:"allowedOrigins"`
+	PluginsDir      string   `json:"pluginsDir"`
+	TrustedProxies  []string `json:"trustedProxies"`  // IPs/CIDRs that may set X-Forwarded-For
+	ShutdownTimeout int      `json:"shutdownTimeout"` // graceful drain in seconds (default 5)
+	MaxMessages     int      `json:"maxMessages"`     // per-session message cap (0 = unlimited)
 }
 
 type AgentConfig struct {

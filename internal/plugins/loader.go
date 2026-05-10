@@ -114,17 +114,59 @@ func NewLoader(dir string) *Loader {
 	return &Loader{dir: dir}
 }
 
-// isPrivateHost returns true if the given host resolves to a loopback,
-// private, or link-local address, guarding against SSRF attacks that target
-// internal infrastructure.
+// isPrivateHost returns true if the given host is known to be private/loopback.
+// For IP literal hosts, this is a direct check.
+// For hostnames, it checks against a deny-list of well-known internal patterns
+// and attempts DNS resolution — if DNS is unavailable the hostname is allowed
+// (better UX in air-gapped / test environments) unless it matches a pattern.
 func isPrivateHost(host string) bool {
-	ips, _ := net.LookupHost(host)
+	// Strip port if present.
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+
+	// If host is an IP literal, check directly (strict).
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			return true
+		}
+		// Block metadata endpoints by literal IP.
+		if ip.String() == "169.254.169.254" {
+			return true
+		}
+		return false
+	}
+
+	// For hostnames: reject known internal patterns regardless of DNS.
+	lower := strings.ToLower(host)
+	for _, pattern := range []string{
+		"localhost", "metadata.google.internal", "instance-data",
+	} {
+		if lower == pattern {
+			return true
+		}
+	}
+	if strings.HasSuffix(lower, ".local") || strings.HasSuffix(lower, ".internal") ||
+		strings.HasSuffix(lower, ".localhost") {
+		return true
+	}
+
+	// Attempt DNS resolution as a best-effort additional check.
+	// If DNS fails (e.g. in test environments), we allow the hostname to avoid
+	// breaking manifests with legitimate public URLs.
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return false // DNS unavailable → allow (fail open for hostnames only)
+	}
 	for _, ipStr := range ips {
 		ip := net.ParseIP(ipStr)
 		if ip == nil {
 			continue
 		}
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			return true
+		}
+		if ip.String() == "169.254.169.254" {
 			return true
 		}
 	}

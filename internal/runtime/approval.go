@@ -83,7 +83,17 @@ func (q *ApprovalQueue) Wait(ctx context.Context, id string) (ApprovalStatus, er
 	case <-entry.done:
 		return entry.req.Status, nil
 	case <-expiryCh:
-		return ApprovalPending, errors.New("approval request expired")
+		// Mark as rejected and clean up so the map doesn't grow unboundedly.
+		q.mu.Lock()
+		if e, ok := q.requests[id]; ok && e.req.Status == ApprovalPending {
+			now := time.Now().UTC()
+			e.req.Status = ApprovalRejected
+			e.req.DecidedAt = &now
+			close(e.done)
+			delete(q.requests, id)
+		}
+		q.mu.Unlock()
+		return ApprovalRejected, errors.New("approval request expired")
 	}
 }
 

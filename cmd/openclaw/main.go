@@ -817,19 +817,8 @@ func runGateway(cfg config.Config) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// SIGHUP: reload config and re-apply token/password without restart.
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
-	go func() {
-		for range sighupCh {
-			if reloaded, err := config.Load(""); err == nil {
-				fmt.Println("[openclaw-go] config reloaded via SIGHUP")
-				_ = reloaded // server.SetAuth and re-config would go here
-			} else {
-				fmt.Fprintf(os.Stderr, "[openclaw-go] SIGHUP config reload failed: %v\n", err)
-			}
-		}
-	}()
 
 	server := gateway.New(
 		cfg.Gateway.Host,
@@ -845,6 +834,28 @@ func runGateway(cfg config.Config) error {
 
 	// Configure additional auth modes (password + trusted proxies).
 	server.SetAuth(cfg.Gateway.Password, cfg.Gateway.TrustedProxies)
+	if cfg.Gateway.ShutdownTimeout > 0 {
+		server.SetShutdownTimeout(time.Duration(cfg.Gateway.ShutdownTimeout) * time.Second)
+	}
+	if cfg.Gateway.MaxMessages > 0 {
+		store.SetMaxMessages(cfg.Gateway.MaxMessages)
+	}
+
+	// SIGHUP: reload config and re-apply auth credentials + shutdown timeout.
+	go func() {
+		for range sighupCh {
+			reloaded, err := config.Load("")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[openclaw-go] SIGHUP config reload failed: %v\n", err)
+				continue
+			}
+			server.SetAuth(reloaded.Gateway.Password, reloaded.Gateway.TrustedProxies)
+			if reloaded.Gateway.ShutdownTimeout > 0 {
+				server.SetShutdownTimeout(time.Duration(reloaded.Gateway.ShutdownTimeout) * time.Second)
+			}
+			fmt.Printf("[openclaw-go] config reloaded via SIGHUP (auth, proxies, shutdown timeout)\n")
+		}
+	}()
 
 	// Auto-cleanup stale sessions daily (sessions not updated in 30 days).
 	go func() {

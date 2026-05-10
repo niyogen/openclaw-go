@@ -265,34 +265,35 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) registerRoutes() {
-	s.mux.HandleFunc("/health", withCORS(s.handleHealth))
-	s.mux.Handle("GET /tools", withCORS(s.withAuth(s.handleToolsList)))
-	s.mux.Handle("POST /tools/invoke", withCORS(s.withAuth(s.withRateLimit(withBodyLimit(s.handleToolsInvoke)))))
-	s.mux.Handle("GET /sessions", withCORS(s.withAuth(s.handleListSessions)))
-	s.mux.Handle("GET /sessions/{id}", withCORS(s.withAuth(s.handleGetSession)))
-	s.mux.Handle("DELETE /sessions/{id}", withCORS(s.withAuth(s.handleDeleteSession)))
-	s.mux.Handle("DELETE /sessions", withCORS(s.withAuth(withBodyLimit(s.handleBulkDeleteSessions))))
-	s.mux.Handle("GET /sessions/{id}/history", withCORS(s.withAuth(s.handleSessionHistory)))
-	s.mux.Handle("POST /sessions/{id}/patch", withCORS(s.withAuth(withBodyLimit(s.handleSessionPatch))))
-	s.mux.Handle("POST /sessions/{id}/kill", withCORS(s.withAuth(s.handleSessionKill)))
-	s.mux.Handle("POST /sessions/{id}/compact", withCORS(s.withAuth(s.handleSessionCompact)))
-	s.mux.Handle("GET /sessions/{id}/stats", withCORS(s.withAuth(s.handleSessionStats)))
-	s.mux.Handle("GET /agent/run/{runId}", withCORS(s.withAuth(s.handleAgentRunGet)))
-	s.mux.HandleFunc("/message", withCORS(s.withAuth(s.withRateLimit(withBodyLimit(s.handleMessage)))))
-	s.mux.Handle("POST /agent/run", withCORS(s.withAuth(s.withRateLimit(withBodyLimit(s.handleAgentRun)))))
-	s.mux.Handle("GET /approvals", withCORS(s.withAuth(s.handleApprovalsList)))
-	s.mux.Handle("POST /approvals/{id}/decide", withCORS(s.withAuth(withBodyLimit(s.handleApprovalDecide))))
-	s.mux.Handle("GET /logs", withCORS(s.withAuth(s.handleLogsList)))
-	s.mux.Handle("GET /cron", withCORS(s.withAuth(s.handleCronList)))
-	s.mux.Handle("POST /cron", withCORS(s.withAuth(withBodyLimit(s.handleCronAdd))))
-	s.mux.Handle("DELETE /cron/{id}", withCORS(s.withAuth(s.handleCronDelete)))
-	s.mux.Handle("GET /hooks", withCORS(s.withAuth(s.handleHooksList)))
-	s.mux.Handle("POST /hooks", withCORS(s.withAuth(withBodyLimit(s.handleHooksAdd))))
-	s.mux.Handle("DELETE /hooks/{id}", withCORS(s.withAuth(s.handleHooksDelete)))
-	s.mux.Handle("GET /secrets", withCORS(s.withAuth(s.handleSecretsList)))
-	s.mux.Handle("POST /secrets", withCORS(s.withAuth(withBodyLimit(s.handleSecretsSet))))
-	s.mux.Handle("DELETE /secrets/{name}", withCORS(s.withAuth(s.handleSecretsDelete)))
-	s.mux.HandleFunc("/rpc", withCORS(s.withAuth(s.withRateLimit(withBodyLimit(s.handleRPC)))))
+	cors := s.withCORSMiddleware
+	s.mux.HandleFunc("/health", cors(s.handleHealth))
+	s.mux.Handle("GET /tools", cors(s.withAuth(s.handleToolsList)))
+	s.mux.Handle("POST /tools/invoke", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleToolsInvoke)))))
+	s.mux.Handle("GET /sessions", cors(s.withAuth(s.handleListSessions)))
+	s.mux.Handle("GET /sessions/{id}", cors(s.withAuth(s.handleGetSession)))
+	s.mux.Handle("DELETE /sessions/{id}", cors(s.withAuth(s.handleDeleteSession)))
+	s.mux.Handle("DELETE /sessions", cors(s.withAuth(withBodyLimit(s.handleBulkDeleteSessions))))
+	s.mux.Handle("GET /sessions/{id}/history", cors(s.withAuth(s.handleSessionHistory)))
+	s.mux.Handle("POST /sessions/{id}/patch", cors(s.withAuth(withBodyLimit(s.handleSessionPatch))))
+	s.mux.Handle("POST /sessions/{id}/kill", cors(s.withAuth(s.handleSessionKill)))
+	s.mux.Handle("POST /sessions/{id}/compact", cors(s.withAuth(s.handleSessionCompact)))
+	s.mux.Handle("GET /sessions/{id}/stats", cors(s.withAuth(s.handleSessionStats)))
+	s.mux.Handle("GET /agent/run/{runId}", cors(s.withAuth(s.handleAgentRunGet)))
+	s.mux.HandleFunc("/message", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleMessage)))))
+	s.mux.Handle("POST /agent/run", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleAgentRun)))))
+	s.mux.Handle("GET /approvals", cors(s.withAuth(s.handleApprovalsList)))
+	s.mux.Handle("POST /approvals/{id}/decide", cors(s.withAuth(withBodyLimit(s.handleApprovalDecide))))
+	s.mux.Handle("GET /logs", cors(s.withAuth(s.handleLogsList)))
+	s.mux.Handle("GET /cron", cors(s.withAuth(s.handleCronList)))
+	s.mux.Handle("POST /cron", cors(s.withAuth(withBodyLimit(s.handleCronAdd))))
+	s.mux.Handle("DELETE /cron/{id}", cors(s.withAuth(s.handleCronDelete)))
+	s.mux.Handle("GET /hooks", cors(s.withAuth(s.handleHooksList)))
+	s.mux.Handle("POST /hooks", cors(s.withAuth(withBodyLimit(s.handleHooksAdd))))
+	s.mux.Handle("DELETE /hooks/{id}", cors(s.withAuth(s.handleHooksDelete)))
+	s.mux.Handle("GET /secrets", cors(s.withAuth(s.handleSecretsList)))
+	s.mux.Handle("POST /secrets", cors(s.withAuth(withBodyLimit(s.handleSecretsSet))))
+	s.mux.Handle("DELETE /secrets/{name}", cors(s.withAuth(s.handleSecretsDelete)))
+	s.mux.HandleFunc("/rpc", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleRPC)))))
 	s.mux.HandleFunc("/ws", s.withAuth(s.handleWS))
 }
 
@@ -337,19 +338,29 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 
 	all := s.store.List()
 
-	// Sort by UpdatedAt descending for stable cursor pagination.
-	sort.Slice(all, func(i, j int) bool {
+	// Stable sort: UpdatedAt descending, ID ascending as tiebreaker.
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].UpdatedAt.Equal(all[j].UpdatedAt) {
+			return all[i].ID < all[j].ID
+		}
 		return all[i].UpdatedAt.After(all[j].UpdatedAt)
 	})
 
-	// Apply cursor (skip until we find the cursor id, then take from there).
+	// Apply cursor — if the cursor ID is not found return empty page rather
+	// than silently restarting at page one.
 	start := 0
 	if cursor != "" {
+		found := false
 		for i, sess := range all {
 			if sess.ID == cursor {
 				start = i + 1
+				found = true
 				break
 			}
+		}
+		if !found {
+			writeJSON(w, http.StatusOK, map[string]any{"sessions": []sessionSummary{}, "total": s.store.Count()})
+			return
 		}
 	}
 
@@ -2482,8 +2493,44 @@ func withBodyLimit(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// withCORS adds standard CORS headers so browser clients can reach the gateway.
+// corsAllowOrigin returns the ACAO header value for the given request origin.
+// When allowedOrigins is configured it echoes the origin if it matches
+// (enabling credentials), otherwise falls back to *.
+func (s *Server) corsAllowOrigin(origin string) string {
+	if len(s.allowedOrigins) > 0 && s.isAllowedOrigin(origin) {
+		return origin
+	}
+	// No allowlist configured — use wildcard (safe for unauthenticated APIs).
+	return "*"
+}
+
+// withCORS adds CORS headers aligned with the gateway's allowedOrigins policy.
+// When an explicit allowlist is configured, it echoes the request Origin and
+// sets Allow-Credentials: true so browser clients can include auth headers.
 // Preflight OPTIONS requests are answered with 204 immediately.
+func (s *Server) withCORSMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		allowOrigin := s.corsAllowOrigin(origin)
+		w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-OpenClaw-Token")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		if allowOrigin != "*" {
+			// Allow credentials (cookies, Authorization) when using an explicit origin.
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// withCORS is a package-level alias kept for callers that don't have Server
+// context; it uses the permissive wildcard policy.
 func withCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")

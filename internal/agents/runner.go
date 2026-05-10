@@ -51,6 +51,19 @@ func (r *MultiRunner) GenerateReply(ctx context.Context, turn Turn) (string, err
 	return "", errors.New("no runner configured")
 }
 
+// StreamReply implements StreamingRunner by delegating to the Primary runner's
+// native streaming if it supports it; otherwise falls back to SimulatedStream.
+// This ensures native SSE from OpenAI/Anthropic is used when available.
+func (r *MultiRunner) StreamReply(ctx context.Context, turn Turn, out chan<- StreamChunk) {
+	if r.Primary != nil {
+		if sr, ok := r.Primary.(StreamingRunner); ok {
+			sr.StreamReply(ctx, turn, out)
+			return
+		}
+	}
+	SimulatedStream(ctx, r, turn, out)
+}
+
 type RunnerOptions struct {
 	Provider         string
 	OpenAIAPIKey     string

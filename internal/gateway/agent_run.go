@@ -112,9 +112,13 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 	}
 	exec := runtime.NewExecutor(s.runner, toolFn)
 	exec.SetSubagentFn(func(ctx context.Context, message, instructions string) (string, error) {
-		subSessionID := "subagent-" + generateRunID()
-		_ = s.store.UpsertSession(subSessionID, "subagent", "")
-		reply, err := s.runner.GenerateReply(ctx, agents.Turn{Message: message, History: nil})
+		// Run the sub-agent with its own isolated turn (no shared session history).
+		// Pass instructions as a system message so the sub-agent has the right context.
+		var subHistory []agents.HistoryMessage
+		if strings.TrimSpace(instructions) != "" {
+			subHistory = []agents.HistoryMessage{{Role: "system", Content: instructions}}
+		}
+		reply, err := s.runner.GenerateReply(ctx, agents.Turn{Message: message, History: subHistory})
 		if err != nil {
 			return "", err
 		}
@@ -230,6 +234,8 @@ func (s *Server) handleBulkDeleteSessions(w http.ResponseWriter, r *http.Request
 		for _, id := range req.IDs {
 			if ok, _ := s.store.Delete(id); ok {
 				removed++
+				s.bus.Publish(GatewayEvent{Type: EventSessionDeleted, SessionID: id})
+				s.logs.Append(logstore.LevelInfo, "sessions", "session deleted (bulk): "+id, nil) //nolint:errcheck
 			}
 		}
 	} else if req.OlderThan != "" {

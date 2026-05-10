@@ -38,12 +38,26 @@ func DefaultPolicy() ExecPolicy {
 	}
 }
 
+const (
+	maxAllowedToolRetries = 5  // cap prevents runaway backoff (~3s total)
+	maxAllowedMaxRetries  = 10 // cap on runner retries
+)
+
 func (p ExecPolicy) normalize() ExecPolicy {
 	if p.MaxRetries <= 0 {
 		p.MaxRetries = 2
 	}
+	if p.MaxRetries > maxAllowedMaxRetries {
+		p.MaxRetries = maxAllowedMaxRetries
+	}
 	if p.MaxTurns <= 0 {
 		p.MaxTurns = 20
+	}
+	if p.ToolRetries < 0 {
+		p.ToolRetries = 0
+	}
+	if p.ToolRetries > maxAllowedToolRetries {
+		p.ToolRetries = maxAllowedToolRetries
 	}
 	return p
 }
