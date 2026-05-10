@@ -261,11 +261,17 @@ func (s *Store) save() error {
 func (s *Store) load() error {
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(raw) == 0 {
 		return nil
 	}
 	var state persistedState
 	if err := json.Unmarshal(raw, &state); err != nil {
-		return nil
+		return fmt.Errorf("topology: corrupt state file %s: %w", s.path, err)
 	}
 	for _, n := range state.Nodes {
 		s.nodes[n.ID] = n

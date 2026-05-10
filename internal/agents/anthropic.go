@@ -101,16 +101,38 @@ func buildAnthropicMessages(turn Turn) []anthropicMessage {
 			} else {
 				messages = append(messages, anthropicMessage{Role: "user", Content: toolContent})
 			}
-		case "user", "assistant":
+		case "assistant":
+			// Flush any pending system context into a preceding user turn so
+			// the assistant row itself is never prefixed with system text.
+			if len(pendingSystem) > 0 {
+				sysText := strings.Join(pendingSystem, "\n")
+				pendingSystem = pendingSystem[:0]
+				if len(messages) > 0 && messages[len(messages)-1].Role == "user" {
+					messages[len(messages)-1].Content += "\n" + sysText
+				} else {
+					messages = append(messages, anthropicMessage{Role: "user", Content: sysText})
+				}
+			}
+			// Ensure we never start with an assistant turn (Anthropic requires
+			// the first message to be from the user).
+			if len(messages) == 0 {
+				continue
+			}
+			if messages[len(messages)-1].Role == "assistant" {
+				messages[len(messages)-1].Content += "\n" + content
+			} else {
+				messages = append(messages, anthropicMessage{Role: "assistant", Content: content})
+			}
+		case "user":
 			userContent := content
-			if role == "user" && len(pendingSystem) > 0 {
+			if len(pendingSystem) > 0 {
 				userContent = strings.Join(pendingSystem, "\n") + "\n" + content
 				pendingSystem = pendingSystem[:0]
 			}
-			if len(messages) > 0 && messages[len(messages)-1].Role == role {
+			if len(messages) > 0 && messages[len(messages)-1].Role == "user" {
 				messages[len(messages)-1].Content += "\n" + userContent
 			} else {
-				messages = append(messages, anthropicMessage{Role: role, Content: userContent})
+				messages = append(messages, anthropicMessage{Role: "user", Content: userContent})
 			}
 		}
 	}

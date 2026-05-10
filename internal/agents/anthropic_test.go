@@ -85,6 +85,53 @@ func TestAnthropicEmptyContentSkipped(t *testing.T) {
 	}
 }
 
+// TestAnthropicLeadingAssistantDropped verifies that a history starting with
+// an assistant turn is dropped (Anthropic requires user first).
+func TestAnthropicLeadingAssistantDropped(t *testing.T) {
+	turn := Turn{
+		History: []HistoryMessage{
+			{Role: "assistant", Content: "I started first — invalid"},
+			{Role: "user", Content: "ok"},
+		},
+		Message: "continue",
+	}
+	msgs := buildAnthropicMessages(turn)
+	if msgs[0].Role != "user" {
+		t.Fatalf("first message must be user, got %s: %q", msgs[0].Role, msgs[0].Content)
+	}
+}
+
+// TestAnthropicSystemBeforeAssistantFlushesToUser verifies that pending system
+// context is flushed into a user turn when an assistant message follows it,
+// not silently dropped.
+func TestAnthropicSystemBeforeAssistantFlushesToUser(t *testing.T) {
+	turn := Turn{
+		History: []HistoryMessage{
+			{Role: "user", Content: "first"},
+			{Role: "system", Content: "context note"},
+			{Role: "assistant", Content: "reply"},
+		},
+		Message: "next",
+	}
+	msgs := buildAnthropicMessages(turn)
+	// The system context must appear in a user turn, not be lost.
+	found := false
+	for _, m := range msgs {
+		if m.Role == "user" && strings.Contains(m.Content, "context note") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("system context 'context note' not found in any user turn: %+v", msgs)
+	}
+	// Alternation must still hold.
+	for i := 1; i < len(msgs); i++ {
+		if msgs[i].Role == msgs[i-1].Role {
+			t.Fatalf("consecutive same-role at index %d: %s", i, msgs[i].Role)
+		}
+	}
+}
+
 func TestAnthropicCurrentMessageAlwaysLastUser(t *testing.T) {
 	turn := Turn{
 		History: []HistoryMessage{

@@ -134,7 +134,7 @@ func (s *Store) load() error {
 	}
 	var entries []secretEntry
 	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil
+		return fmt.Errorf("secretstore: corrupt data file %s: %w", s.path, err)
 	}
 	for i := range entries {
 		e := entries[i]

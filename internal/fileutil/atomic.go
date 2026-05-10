@@ -21,12 +21,15 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 		return os.WriteFile(path, data, perm)
 	}
 	tmpName := tmp.Name()
+	closed := false
 
 	// Guarantee the temp file is removed on any failure path.
 	ok := false
 	defer func() {
 		if !ok {
-			tmp.Close()
+			if !closed {
+				tmp.Close()
+			}
 			os.Remove(tmpName)
 		}
 	}()
@@ -34,9 +37,14 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
+	// Apply the requested permissions before renaming so the final file
+	// has the correct mode. On Windows this adjusts the read-only bit only,
+	// but the call is harmless and consistent with os.WriteFile semantics.
+	_ = tmp.Chmod(perm)
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	closed = true
 
 	if err := os.Rename(tmpName, path); err != nil {
 		// Rename failed (e.g. cross-device or Windows lock); fall back to

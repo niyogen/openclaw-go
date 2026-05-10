@@ -544,6 +544,17 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 		s.bus.Publish(GatewayEvent{Type: EventSessionCreated, SessionID: req.SessionID})
 		s.logs.Append(logstore.LevelInfo, "sessions", "session created: "+req.SessionID, nil)
 	}
+	// Snapshot history BEFORE appending the current user message so that
+	// buildMessages (which also appends turn.Message) does not duplicate it.
+	historyMessages := []agents.HistoryMessage{}
+	if existing, ok := s.store.Get(req.SessionID); ok {
+		for _, msg := range existing.Messages {
+			historyMessages = append(historyMessages, agents.HistoryMessage{
+				Role:    string(msg.Role),
+				Content: msg.Content,
+			})
+		}
+	}
 	if err := s.store.AppendMessage(req.SessionID, sessions.Message{
 		Role:      sessions.RoleUser,
 		Content:   req.Message,
@@ -559,15 +570,6 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 		SessionID: req.SessionID,
 		Data:      map[string]any{"role": "user", "content": req.Message},
 	})
-	historyMessages := []agents.HistoryMessage{}
-	if existing, ok := s.store.Get(req.SessionID); ok {
-		for _, msg := range existing.Messages {
-			historyMessages = append(historyMessages, agents.HistoryMessage{
-				Role:    string(msg.Role),
-				Content: msg.Content,
-			})
-		}
-	}
 	reply, err := s.runner.GenerateReply(ctx, agents.Turn{
 		Message: req.Message,
 		History: historyMessages,
@@ -710,7 +712,18 @@ func (s *Server) dispatchRPC(
 	case "gateway.status", "status":
 		return s.gatewayStatus(), nil
 	case "sessions.list":
-		return map[string]any{"sessions": s.store.List()}, nil
+		all := s.store.List()
+		summaries := make([]sessionSummary, 0, len(all))
+		for _, sess := range all {
+			summaries = append(summaries, sessionSummary{
+				ID:           sess.ID,
+				Channel:      sess.Channel,
+				Target:       sess.Target,
+				MessageCount: len(sess.Messages),
+				UpdatedAt:    sess.UpdatedAt,
+			})
+		}
+		return map[string]any{"sessions": summaries}, nil
 	case "sessions.get":
 		var p sessionIDParams
 		if len(params) == 0 {
@@ -2164,7 +2177,13 @@ func isTrustedProxy(remoteIP string, proxies []string) bool {
 				return true
 			}
 		} else {
-			if proxy == remoteIP {
+			// Use ParseIP for canonical comparison so IPv6 forms match
+			// regardless of textual representation (e.g. ::1 vs ::0:1).
+			proxyIP := net.ParseIP(proxy)
+			if proxyIP != nil && ip != nil && proxyIP.Equal(ip) {
+				return true
+			} else if proxyIP == nil && proxy == remoteIP {
+				// Unparseable entry: fall back to string equality.
 				return true
 			}
 		}
