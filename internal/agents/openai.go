@@ -52,8 +52,9 @@ type openAIMessage struct {
 }
 
 type openAIChatRequest struct {
-	Model    string          `json:"model"`
-	Messages []openAIMessage `json:"messages"`
+	Model     string          `json:"model"`
+	Messages  []openAIMessage `json:"messages"`
+	MaxTokens int             `json:"max_tokens,omitempty"`
 }
 
 type openAIChatResponse struct {
@@ -72,8 +73,9 @@ func (r *OpenAIRunner) GenerateReply(ctx context.Context, turn Turn) (string, er
 		return "", fmt.Errorf("openai: cannot send request with no messages")
 	}
 	reqBody := openAIChatRequest{
-		Model:    r.model,
-		Messages: messages,
+		Model:     r.model,
+		Messages:  messages,
+		MaxTokens: turn.MaxTokens,
 	}
 	raw, err := json.Marshal(reqBody)
 	if err != nil {

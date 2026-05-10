@@ -24,6 +24,7 @@ type ApprovalRequest struct {
 	Arguments map[string]any `json:"arguments"`
 	Status    ApprovalStatus `json:"status"`
 	CreatedAt time.Time      `json:"createdAt"`
+	ExpiresAt time.Time      `json:"expiresAt,omitempty"`
 	DecidedAt *time.Time     `json:"decidedAt,omitempty"`
 }
 
@@ -44,13 +45,18 @@ func NewApprovalQueue() *ApprovalQueue {
 }
 
 // Enqueue adds a new request and returns its id.
+// If ExpiresAt is zero it is defaulted to 10 minutes from now.
 func (q *ApprovalQueue) Enqueue(req *ApprovalRequest) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if req.ExpiresAt.IsZero() {
+		req.ExpiresAt = time.Now().UTC().Add(10 * time.Minute)
+	}
 	q.requests[req.ID] = &approvalEntry{req: req, done: make(chan struct{})}
 }
 
-// Wait blocks until the request is decided or the context is cancelled.
+// Wait blocks until the request is decided, the context is cancelled, or the
+// request expires (when ExpiresAt is non-zero).
 func (q *ApprovalQueue) Wait(ctx context.Context, id string) (ApprovalStatus, error) {
 	q.mu.Lock()
 	entry, ok := q.requests[id]
@@ -58,11 +64,26 @@ func (q *ApprovalQueue) Wait(ctx context.Context, id string) (ApprovalStatus, er
 	if !ok {
 		return ApprovalPending, errors.New("approval request not found")
 	}
+
+	// Build expiry channel when ExpiresAt is set.
+	var expiryCh <-chan time.Time
+	if !entry.req.ExpiresAt.IsZero() {
+		d := time.Until(entry.req.ExpiresAt)
+		if d <= 0 {
+			return ApprovalPending, errors.New("approval request expired")
+		}
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		expiryCh = timer.C
+	}
+
 	select {
 	case <-ctx.Done():
 		return ApprovalPending, ctx.Err()
 	case <-entry.done:
 		return entry.req.Status, nil
+	case <-expiryCh:
+		return ApprovalPending, errors.New("approval request expired")
 	}
 }
 
@@ -100,13 +121,17 @@ func (q *ApprovalQueue) pruneLocked() {
 	}
 }
 
-// List returns all pending requests.
+// List returns all pending non-expired requests.
 func (q *ApprovalQueue) List() []*ApprovalRequest {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	now := time.Now().UTC()
 	out := make([]*ApprovalRequest, 0, len(q.requests))
 	for _, e := range q.requests {
 		if e.req.Status == ApprovalPending {
+			if !e.req.ExpiresAt.IsZero() && e.req.ExpiresAt.Before(now) {
+				continue // skip expired
+			}
 			cp := *e.req
 			out = append(out, &cp)
 		}

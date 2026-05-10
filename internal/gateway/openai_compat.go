@@ -126,15 +126,32 @@ func (s *Server) handleV1Embeddings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	var req struct {
-		Model string   `json:"model"`
-		Input []string `json:"input"`
+	var raw struct {
+		Model string          `json:"model"`
+		Input json.RawMessage `json:"input"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// input may also be a single string
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
 		return
 	}
+	if len(raw.Input) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "input is required"})
+		return
+	}
+	// Accept either a JSON array of strings or a single string.
+	var inputs []string
+	if err := json.Unmarshal(raw.Input, &inputs); err != nil {
+		var single string
+		if err2 := json.Unmarshal(raw.Input, &single); err2 != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "input must be a string or array of strings"})
+			return
+		}
+		inputs = []string{single}
+	}
+	req := struct {
+		Model string
+		Input []string
+	}{Model: raw.Model, Input: inputs}
 	if len(req.Input) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "input is required"})
 		return
@@ -302,6 +319,9 @@ func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request)
 		history = history[:len(history)-1]
 	}
 	turn := agents.Turn{Message: currentMsg, History: history}
+	if req.MaxTokens != nil {
+		turn.MaxTokens = *req.MaxTokens
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -408,6 +428,7 @@ func (s *Server) handleV1ChatStream(
 		agents.Stream(ctx, s.runner, turn, out)
 	}()
 
+	var replyRunes int
 	for chunk := range out {
 		if chunk.Err != nil {
 			errMsg := map[string]any{
@@ -421,6 +442,22 @@ func (s *Server) handleV1ChatStream(
 		if chunk.Done {
 			stop := "stop"
 			writeDelta("", &stop)
+			// Emit usage before [DONE] so clients can track token consumption.
+			promptToks := countTokensApprox(turn)
+			usageChunk := map[string]any{
+				"id":      id,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   model,
+				"choices": []any{},
+				"usage": map[string]int{
+					"prompt_tokens":     promptToks,
+					"completion_tokens": replyRunes,
+					"total_tokens":      promptToks + replyRunes,
+				},
+			}
+			raw, _ := json.Marshal(usageChunk)
+			fmt.Fprintf(w, "data: %s\n\n", raw)
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 			return
@@ -433,6 +470,7 @@ func (s *Server) handleV1ChatStream(
 				continue
 			}
 		}
+		replyRunes += len([]rune(chunk.Delta))
 		writeDelta(chunk.Delta, nil)
 	}
 	fmt.Fprintf(w, "data: [DONE]\n\n")

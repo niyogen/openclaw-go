@@ -167,9 +167,13 @@ func (r *AnthropicRunner) GenerateReply(ctx context.Context, turn Turn) (string,
 		return "", fmt.Errorf("anthropic: cannot send request with no messages")
 	}
 
+	maxToks := turn.MaxTokens
+	if maxToks <= 0 {
+		maxToks = 4096
+	}
 	reqBody := anthropicRequest{
 		Model:     r.model,
-		MaxTokens: 4096,
+		MaxTokens: maxToks,
 		Messages:  messages,
 	}
 	raw, err := json.Marshal(reqBody)

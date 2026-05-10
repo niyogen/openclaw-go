@@ -288,9 +288,27 @@ func (e *Executor) InvokeToolWithPolicy(
 		rec.Error = "no tool executor registered"
 		return rec
 	}
-	result, err := e.toolFn(ctx, toolName, arguments)
-	if err != nil {
-		rec.Error = err.Error()
+
+	var result any
+	var execErr error
+	attempts := 1 + policy.ToolRetries
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(100*(1<<uint(attempt-1))) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				rec.Error = ctx.Err().Error()
+				return rec
+			case <-time.After(backoff):
+			}
+		}
+		result, execErr = e.toolFn(ctx, toolName, arguments)
+		if execErr == nil {
+			break
+		}
+	}
+	if execErr != nil {
+		rec.Error = execErr.Error()
 	} else {
 		rec.Result = result
 	}

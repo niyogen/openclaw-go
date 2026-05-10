@@ -48,10 +48,10 @@ func TestLoaderLoadsManifest(t *testing.T) {
 		Version:     "1.0.0",
 		Description: "test plugin",
 		Routes: []ManifestRoute{
-			{Method: "GET", Path: "/plugins/my-plugin/ping", Forward: "http://localhost:9999"},
+			{Method: "GET", Path: "/plugins/my-plugin/ping", Forward: "https://example.com/webhook"},
 		},
 		Tools: []ManifestTool{
-			{Name: "my-plugin.hello", Description: "say hello", Endpoint: "http://localhost:9999/tools/hello"},
+			{Name: "my-plugin.hello", Description: "say hello", Endpoint: "https://example.com/tools/hello"},
 		},
 	})
 
@@ -81,11 +81,11 @@ func TestLoaderRejectsUnsafeURLScheme(t *testing.T) {
 			{Method: "GET", Path: "/plugins/evil/ping", Forward: "file:///etc/passwd"},
 		},
 	})
-	// Plugin with an http endpoint — should be accepted.
+	// Plugin with a public https endpoint — should be accepted.
 	writeManifest(t, dir, "safe", Manifest{
 		Name: "safe",
 		Routes: []ManifestRoute{
-			{Method: "GET", Path: "/plugins/safe/ping", Forward: "http://localhost:9999"},
+			{Method: "GET", Path: "/plugins/safe/ping", Forward: "https://example.com/ping"},
 		},
 	})
 	l := NewLoader(dir)

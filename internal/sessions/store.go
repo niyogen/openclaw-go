@@ -65,9 +65,10 @@ type Session struct {
 }
 
 type Store struct {
-	path     string
-	mu       sync.Mutex
-	sessions map[string]*Session
+	path        string
+	mu          sync.Mutex
+	sessions    map[string]*Session
+	maxMessages int
 }
 
 func New(path string) (*Store, error) {
@@ -107,6 +108,15 @@ func (s *Store) UpsertSession(id, channel, target string) error {
 	return s.saveLocked()
 }
 
+// SetMaxMessages configures the per-session message cap. When n > 0 and a
+// session exceeds n messages after an append, the oldest messages are trimmed
+// so that only the most recent n remain. Set to 0 to disable the cap.
+func (s *Store) SetMaxMessages(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxMessages = n
+}
+
 func (s *Store) AppendMessage(sessionID string, msg Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -115,6 +125,10 @@ func (s *Store) AppendMessage(sessionID string, msg Message) error {
 		return errors.New("session does not exist")
 	}
 	current.Messages = append(current.Messages, msg)
+	if s.maxMessages > 0 && len(current.Messages) > s.maxMessages {
+		excess := len(current.Messages) - s.maxMessages
+		current.Messages = current.Messages[excess:]
+	}
 	current.UpdatedAt = time.Now().UTC()
 	return s.saveLocked()
 }

@@ -19,11 +19,15 @@ type ExecPolicy struct {
 	// RequireApproval lists tool names that must be approved before execution.
 	RequireApproval []string `json:"requireApproval"`
 
-	// MaxRetries controls how many times a failed tool call may be retried.
+	// MaxRetries controls how many times a failed runner call may be retried.
 	MaxRetries int `json:"maxRetries"`
 
 	// MaxTurns is the maximum number of agent turns before the run is halted.
 	MaxTurns int `json:"maxTurns"`
+
+	// ToolRetries is how many times a failed tool call is retried with
+	// exponential backoff (100ms * 2^attempt). Zero means no retries.
+	ToolRetries int `json:"toolRetries"`
 }
 
 // DefaultPolicy returns a permissive policy suitable for local/trusted use.

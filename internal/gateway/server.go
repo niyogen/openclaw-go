@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,30 +30,31 @@ import (
 )
 
 type Server struct {
-	host           string
-	port           int
-	authToken      string
-	password       string
-	trustedProxies []string
-	allowedOrigins map[string]struct{}
-	store          *sessions.Store
-	runner         agents.Runner
-	route          *channels.Router
-	registry       *plugins.Registry
-	tools          *ToolRegistry
-	approvals      *runtime.ApprovalQueue
-	logs           *logstore.Store
-	cron           *cronstore.Store
-	hooks          *hookstore.Store
-	secrets        *secretstore.Store
-	rateLimiter    *RateLimiter
-	bus            *EventBus
-	shutdownMu     sync.Mutex
-	shutdownFn     func()
-	topo           *topology.Store
-	workspace      *agents.Workspace
-	mux            *http.ServeMux
-	startedAt      time.Time
+	host            string
+	port            int
+	authToken       string
+	password        string
+	trustedProxies  []string
+	allowedOrigins  map[string]struct{}
+	store           *sessions.Store
+	runner          agents.Runner
+	route           *channels.Router
+	registry        *plugins.Registry
+	tools           *ToolRegistry
+	approvals       *runtime.ApprovalQueue
+	logs            *logstore.Store
+	cron            *cronstore.Store
+	hooks           *hookstore.Store
+	secrets         *secretstore.Store
+	rateLimiter     *RateLimiter
+	bus             *EventBus
+	shutdownMu      sync.Mutex
+	shutdownFn      func()
+	topo            *topology.Store
+	workspace       *agents.Workspace
+	mux             *http.ServeMux
+	startedAt       time.Time
+	shutdownTimeout time.Duration
 }
 
 func New(
@@ -87,36 +89,61 @@ func New(
 	s.bus = NewEventBus()
 	s.shutdownFn = func() {} // replaced by Run()
 	// Use filepath.Join for all paths to ensure correct separators on Windows.
+	// Log a warning to stderr when primary dataDir stores fail so operators
+	// know they're falling back to volatile tmpdir-backed state.
+	fallbackWarn := func(name, tmpPath string) {
+		fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: %s store unavailable in %s — falling back to %s (data will not survive restart)\n", name, dataDir, tmpPath)
+	}
 	s.topo, _ = topology.New(filepath.Join(dataDir, "topology.json"))
 	s.workspace, _ = agents.NewWorkspace(filepath.Join(dataDir, "workspace.json"))
 	if s.topo == nil {
-		s.topo, _ = topology.New(filepath.Join(os.TempDir(), "openclaw-go-topology.json"))
+		tmp := filepath.Join(os.TempDir(), "openclaw-go-topology.json")
+		fallbackWarn("topology", tmp)
+		s.topo, _ = topology.New(tmp)
 	}
 	if s.workspace == nil {
-		s.workspace, _ = agents.NewWorkspace(filepath.Join(os.TempDir(), "openclaw-go-workspace.json"))
+		tmp := filepath.Join(os.TempDir(), "openclaw-go-workspace.json")
+		fallbackWarn("workspace", tmp)
+		s.workspace, _ = agents.NewWorkspace(tmp)
 	}
 	s.logs, _ = logstore.New(filepath.Join(dataDir, "logs.json"))
 	s.cron, _ = cronstore.New(filepath.Join(dataDir, "cron.json"))
 	s.hooks, _ = hookstore.New(filepath.Join(dataDir, "hooks.json"))
 	s.secrets, _ = secretstore.New(filepath.Join(dataDir, "secrets.json"))
 	if s.logs == nil {
-		s.logs, _ = logstore.New(filepath.Join(os.TempDir(), "openclaw-go-logs.json"))
+		tmp := filepath.Join(os.TempDir(), "openclaw-go-logs.json")
+		fallbackWarn("logs", tmp)
+		s.logs, _ = logstore.New(tmp)
 	}
 	if s.cron == nil {
-		s.cron, _ = cronstore.New(filepath.Join(os.TempDir(), "openclaw-go-cron.json"))
+		tmp := filepath.Join(os.TempDir(), "openclaw-go-cron.json")
+		fallbackWarn("cron", tmp)
+		s.cron, _ = cronstore.New(tmp)
 	}
 	if s.hooks == nil {
-		s.hooks, _ = hookstore.New(filepath.Join(os.TempDir(), "openclaw-go-hooks.json"))
+		tmp := filepath.Join(os.TempDir(), "openclaw-go-hooks.json")
+		fallbackWarn("hooks", tmp)
+		s.hooks, _ = hookstore.New(tmp)
 	}
 	if s.secrets == nil {
-		s.secrets, _ = secretstore.New(filepath.Join(os.TempDir(), "openclaw-go-secrets.json"))
+		tmp := filepath.Join(os.TempDir(), "openclaw-go-secrets.json")
+		fallbackWarn("secrets", tmp)
+		s.secrets, _ = secretstore.New(tmp)
 	}
+	s.shutdownTimeout = 5 * time.Second
 	s.initTools()
 	s.registerRoutes()
 	s.registerOpenAICompatRoutes()
 	s.registerUIRoutes()
 	registry.MountRoutes(mux)
 	return s
+}
+
+// SetShutdownTimeout overrides the graceful shutdown drain period (default 5s).
+func (s *Server) SetShutdownTimeout(d time.Duration) {
+	if d > 0 {
+		s.shutdownTimeout = d
+	}
 }
 
 func (s *Server) Address() string {
@@ -225,7 +252,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
@@ -237,32 +264,34 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) registerRoutes() {
-	s.mux.HandleFunc("/health", s.handleHealth)
-	s.mux.Handle("GET /tools", s.withAuth(s.handleToolsList))
-	s.mux.Handle("POST /tools/invoke", s.withAuth(withBodyLimit(s.handleToolsInvoke)))
-	s.mux.Handle("GET /sessions", s.withAuth(s.handleListSessions))
-	s.mux.Handle("GET /sessions/{id}", s.withAuth(s.handleGetSession))
-	s.mux.Handle("DELETE /sessions/{id}", s.withAuth(s.handleDeleteSession))
-	s.mux.Handle("GET /sessions/{id}/history", s.withAuth(s.handleSessionHistory))
-	s.mux.Handle("POST /sessions/{id}/patch", s.withAuth(withBodyLimit(s.handleSessionPatch)))
-	s.mux.Handle("POST /sessions/{id}/kill", s.withAuth(s.handleSessionKill))
-	s.mux.Handle("POST /sessions/{id}/compact", s.withAuth(s.handleSessionCompact))
-	s.mux.Handle("GET /sessions/{id}/stats", s.withAuth(s.handleSessionStats))
-	s.mux.HandleFunc("/message", s.withAuth(s.withRateLimit(withBodyLimit(s.handleMessage))))
-	s.mux.Handle("POST /agent/run", s.withAuth(s.withRateLimit(withBodyLimit(s.handleAgentRun))))
-	s.mux.Handle("GET /approvals", s.withAuth(s.handleApprovalsList))
-	s.mux.Handle("POST /approvals/{id}/decide", s.withAuth(withBodyLimit(s.handleApprovalDecide)))
-	s.mux.Handle("GET /logs", s.withAuth(s.handleLogsList))
-	s.mux.Handle("GET /cron", s.withAuth(s.handleCronList))
-	s.mux.Handle("POST /cron", s.withAuth(withBodyLimit(s.handleCronAdd)))
-	s.mux.Handle("DELETE /cron/{id}", s.withAuth(s.handleCronDelete))
-	s.mux.Handle("GET /hooks", s.withAuth(s.handleHooksList))
-	s.mux.Handle("POST /hooks", s.withAuth(withBodyLimit(s.handleHooksAdd)))
-	s.mux.Handle("DELETE /hooks/{id}", s.withAuth(s.handleHooksDelete))
-	s.mux.Handle("GET /secrets", s.withAuth(s.handleSecretsList))
-	s.mux.Handle("POST /secrets", s.withAuth(withBodyLimit(s.handleSecretsSet)))
-	s.mux.Handle("DELETE /secrets/{name}", s.withAuth(s.handleSecretsDelete))
-	s.mux.HandleFunc("/rpc", s.withAuth(withBodyLimit(s.handleRPC)))
+	s.mux.HandleFunc("/health", withCORS(s.handleHealth))
+	s.mux.Handle("GET /tools", withCORS(s.withAuth(s.handleToolsList)))
+	s.mux.Handle("POST /tools/invoke", withCORS(s.withAuth(s.withRateLimit(withBodyLimit(s.handleToolsInvoke)))))
+	s.mux.Handle("GET /sessions", withCORS(s.withAuth(s.handleListSessions)))
+	s.mux.Handle("GET /sessions/{id}", withCORS(s.withAuth(s.handleGetSession)))
+	s.mux.Handle("DELETE /sessions/{id}", withCORS(s.withAuth(s.handleDeleteSession)))
+	s.mux.Handle("DELETE /sessions", withCORS(s.withAuth(withBodyLimit(s.handleBulkDeleteSessions))))
+	s.mux.Handle("GET /sessions/{id}/history", withCORS(s.withAuth(s.handleSessionHistory)))
+	s.mux.Handle("POST /sessions/{id}/patch", withCORS(s.withAuth(withBodyLimit(s.handleSessionPatch))))
+	s.mux.Handle("POST /sessions/{id}/kill", withCORS(s.withAuth(s.handleSessionKill)))
+	s.mux.Handle("POST /sessions/{id}/compact", withCORS(s.withAuth(s.handleSessionCompact)))
+	s.mux.Handle("GET /sessions/{id}/stats", withCORS(s.withAuth(s.handleSessionStats)))
+	s.mux.Handle("GET /agent/run/{runId}", withCORS(s.withAuth(s.handleAgentRunGet)))
+	s.mux.HandleFunc("/message", withCORS(s.withAuth(s.withRateLimit(withBodyLimit(s.handleMessage)))))
+	s.mux.Handle("POST /agent/run", withCORS(s.withAuth(s.withRateLimit(withBodyLimit(s.handleAgentRun)))))
+	s.mux.Handle("GET /approvals", withCORS(s.withAuth(s.handleApprovalsList)))
+	s.mux.Handle("POST /approvals/{id}/decide", withCORS(s.withAuth(withBodyLimit(s.handleApprovalDecide))))
+	s.mux.Handle("GET /logs", withCORS(s.withAuth(s.handleLogsList)))
+	s.mux.Handle("GET /cron", withCORS(s.withAuth(s.handleCronList)))
+	s.mux.Handle("POST /cron", withCORS(s.withAuth(withBodyLimit(s.handleCronAdd))))
+	s.mux.Handle("DELETE /cron/{id}", withCORS(s.withAuth(s.handleCronDelete)))
+	s.mux.Handle("GET /hooks", withCORS(s.withAuth(s.handleHooksList)))
+	s.mux.Handle("POST /hooks", withCORS(s.withAuth(withBodyLimit(s.handleHooksAdd))))
+	s.mux.Handle("DELETE /hooks/{id}", withCORS(s.withAuth(s.handleHooksDelete)))
+	s.mux.Handle("GET /secrets", withCORS(s.withAuth(s.handleSecretsList)))
+	s.mux.Handle("POST /secrets", withCORS(s.withAuth(withBodyLimit(s.handleSecretsSet))))
+	s.mux.Handle("DELETE /secrets/{name}", withCORS(s.withAuth(s.handleSecretsDelete)))
+	s.mux.HandleFunc("/rpc", withCORS(s.withAuth(s.withRateLimit(withBodyLimit(s.handleRPC)))))
 	s.mux.HandleFunc("/ws", s.withAuth(s.handleWS))
 }
 
@@ -288,9 +317,55 @@ type sessionSummary struct {
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	filterChannel := q.Get("channel")
+	filterSince := q.Get("since")
+	cursor := q.Get("cursor")
+	limit := 50
+	if l := q.Get("limit"); l != "" {
+		var n int
+		if cnt, _ := fmt.Sscanf(l, "%d", &n); cnt == 1 && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+
+	var sinceTime time.Time
+	if filterSince != "" {
+		sinceTime, _ = time.Parse(time.RFC3339, filterSince)
+	}
+
 	all := s.store.List()
-	summaries := make([]sessionSummary, 0, len(all))
-	for _, sess := range all {
+
+	// Sort by UpdatedAt descending for stable cursor pagination.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].UpdatedAt.After(all[j].UpdatedAt)
+	})
+
+	// Apply cursor (skip until we find the cursor id, then take from there).
+	start := 0
+	if cursor != "" {
+		for i, sess := range all {
+			if sess.ID == cursor {
+				start = i + 1
+				break
+			}
+		}
+	}
+
+	summaries := make([]sessionSummary, 0, limit)
+	var nextCursor string
+	for i := start; i < len(all); i++ {
+		sess := all[i]
+		if filterChannel != "" && sess.Channel != filterChannel {
+			continue
+		}
+		if !sinceTime.IsZero() && sess.UpdatedAt.Before(sinceTime) {
+			continue
+		}
+		if len(summaries) >= limit {
+			nextCursor = sess.ID
+			break
+		}
 		summaries = append(summaries, sessionSummary{
 			ID:           sess.ID,
 			Channel:      sess.Channel,
@@ -299,9 +374,12 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt:    sess.UpdatedAt,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"sessions": summaries,
-	})
+
+	resp := map[string]any{"sessions": summaries, "total": s.store.Count()}
+	if nextCursor != "" {
+		resp["nextCursor"] = nextCursor
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
@@ -834,6 +912,15 @@ func (s *Server) dispatchRPC(
 			return s.tools.Invoke(fctx, ToolInvokeRequest{Name: name, Arguments: args})
 		}
 		exec := runtime.NewExecutor(s.runner, toolFn)
+		exec.SetSubagentFn(func(fctx context.Context, message, instructions string) (string, error) {
+			subSessionID := "subagent-" + generateRunID()
+			_ = s.store.UpsertSession(subSessionID, "subagent", "")
+			reply, err := s.runner.GenerateReply(fctx, agents.Turn{Message: message, History: nil})
+			if err != nil {
+				return "", err
+			}
+			return reply, nil
+		})
 		result := exec.Run(ctx, runtime.RunOptions{
 			SessionID:    req.SessionID,
 			Message:      req.Message,
@@ -1342,7 +1429,11 @@ func (s *Server) dispatchRPC(
 			"logEntries":    len(s.logs.List("", "", 0)),
 		}, nil
 	case "doctor.memory.clear":
-		return map[string]any{"ok": true, "note": "use sessions.cleanup to remove stale sessions"}, nil
+		removed, err := s.store.Cleanup(24 * time.Hour)
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "removed": removed}, nil
 
 	// ── TTS ──────────────────────────────────────────────────────────────
 	case "tts.status":
@@ -1751,6 +1842,15 @@ func (s *Server) dispatchRPC(
 			return s.tools.Invoke(fctx, ToolInvokeRequest{Name: name, Arguments: args})
 		}
 		exec := runtime.NewExecutor(s.runner, toolFn)
+		exec.SetSubagentFn(func(fctx context.Context, message, instructions string) (string, error) {
+			subSessionID := "subagent-" + generateRunID()
+			_ = s.store.UpsertSession(subSessionID, "subagent", "")
+			reply, err := s.runner.GenerateReply(fctx, agents.Turn{Message: message, History: nil})
+			if err != nil {
+				return "", err
+			}
+			return reply, nil
+		})
 		result := exec.Run(ctx, runtime.RunOptions{
 			SessionID:    p.SessionID,
 			Message:      p.Message,
@@ -2028,15 +2128,16 @@ func (s *Server) dispatchRPC(
 		return map[string]any{"ok": true, "reset": p.SessionID}, nil
 	case "sessions.cleanup":
 		var p struct {
-			MaxAgeMinutes int `json:"maxAgeMinutes"`
+			MaxAge string `json:"maxAge"`
 		}
 		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+			json.Unmarshal(params, &p) //nolint:errcheck
 		}
-		if p.MaxAgeMinutes <= 0 {
-			p.MaxAgeMinutes = 60
+		maxAge := 24 * time.Hour
+		if d, err := time.ParseDuration(p.MaxAge); err == nil && d > 0 {
+			maxAge = d
 		}
-		removed, err := s.store.Cleanup(time.Duration(p.MaxAgeMinutes) * time.Minute)
+		removed, err := s.store.Cleanup(maxAge)
 		if err != nil {
 			return nil, &rpcError{Code: -32000, Message: err.Error()}
 		}
@@ -2366,6 +2467,22 @@ const maxBodyBytes = 4 << 20
 func withBodyLimit(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		next(w, r)
+	}
+}
+
+// withCORS adds standard CORS headers so browser clients can reach the gateway.
+// Preflight OPTIONS requests are answered with 204 immediately.
+func withCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-OpenClaw-Token")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		next(w, r)
 	}
 }

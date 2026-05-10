@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -38,20 +39,42 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	}
 }
 
+// allowResult carries the decision plus state for rate-limit response headers.
+type allowResult struct {
+	allowed   bool
+	remaining int       // requests remaining in the current window
+	resetAt   time.Time // when the current window resets
+}
+
 // Allow returns true if the request from key should be allowed.
 func (r *RateLimiter) Allow(key string) bool {
+	res := r.AllowWithInfo(key)
+	return res.allowed
+}
+
+// AllowWithInfo returns the full rate-limit result including remaining and reset.
+func (r *RateLimiter) AllowWithInfo(key string) allowResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	now := time.Now()
 	entry, ok := r.entries[key]
 	if !ok || now.Sub(entry.windowAt) > r.window {
-		r.entries[key] = &rateLimitEntry{count: 1, windowAt: now}
+		e := &rateLimitEntry{count: 1, windowAt: now}
+		r.entries[key] = e
 		r.maybePrune(now)
-		return true
+		return allowResult{allowed: true, remaining: r.limit - 1, resetAt: now.Add(r.window)}
 	}
 	entry.count++
-	return entry.count <= r.limit
+	remaining := r.limit - entry.count
+	if remaining < 0 {
+		remaining = 0
+	}
+	return allowResult{
+		allowed:   entry.count <= r.limit,
+		remaining: remaining,
+		resetAt:   entry.windowAt.Add(r.window),
+	}
 }
 
 func (r *RateLimiter) maybePrune(now time.Time) {
@@ -82,12 +105,17 @@ func clientIP(r *http.Request) string {
 }
 
 // withRateLimit wraps a handler to enforce per-IP rate limiting.
+// It also sets standard X-RateLimit-* response headers.
 func (s *Server) withRateLimit(next http.HandlerFunc) http.HandlerFunc {
 	if s.rateLimiter == nil {
 		return next
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.rateLimiter.Allow(clientIP(r)) {
+		res := s.rateLimiter.AllowWithInfo(clientIP(r))
+		w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", s.rateLimiter.limit))
+		w.Header().Set("X-RateLimit-Remaining", fmt.Sprintf("%d", res.remaining))
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", res.resetAt.Unix()))
+		if !res.allowed {
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
 			return
 		}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -66,6 +67,10 @@ func (p *ExternalPlugin) RegisterRoutes(mux *http.ServeMux) {
 						proxyReq.Header.Add(k, v)
 					}
 				}
+				// Strip sensitive headers before forwarding to untrusted plugin backends.
+				for _, h := range []string{"Authorization", "Cookie", "X-OpenClaw-Token", "X-Forwarded-For"} {
+					proxyReq.Header.Del(h)
+				}
 				resp, err := client.Do(proxyReq)
 				if err != nil {
 					http.Error(w, "proxy error: "+err.Error(), http.StatusBadGateway)
@@ -109,8 +114,26 @@ func NewLoader(dir string) *Loader {
 	return &Loader{dir: dir}
 }
 
+// isPrivateHost returns true if the given host resolves to a loopback,
+// private, or link-local address, guarding against SSRF attacks that target
+// internal infrastructure.
+func isPrivateHost(host string) bool {
+	ips, _ := net.LookupHost(host)
+	for _, ipStr := range ips {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return true
+		}
+	}
+	return false
+}
+
 // validateManifestURLs checks that all forward and endpoint URLs in a manifest
-// use an allowed scheme (http or https) to prevent SSRF via file:// or gopher://.
+// use an allowed scheme (http or https) and do not target private/loopback
+// hosts, preventing SSRF via file://, gopher://, or internal network access.
 func validateManifestURLs(m Manifest) error {
 	check := func(raw string) error {
 		if strings.TrimSpace(raw) == "" {
@@ -122,10 +145,14 @@ func validateManifestURLs(m Manifest) error {
 		}
 		switch strings.ToLower(u.Scheme) {
 		case "http", "https":
-			return nil
 		default:
 			return errors.New("only http and https URLs are allowed in plugin manifests")
 		}
+		host := u.Hostname()
+		if isPrivateHost(host) {
+			return fmt.Errorf("plugin manifest URL %q targets a private/loopback host", raw)
+		}
+		return nil
 	}
 	for _, r := range m.Routes {
 		if err := check(r.Forward); err != nil {

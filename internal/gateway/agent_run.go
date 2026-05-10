@@ -29,6 +29,13 @@ type agentRunEntry struct {
 
 var globalRunStore = &agentRunStore{runs: map[string]*agentRunEntry{}}
 
+func (s *agentRunStore) get(id string) (*agentRunEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.runs[id]
+	return e, ok
+}
+
 func (s *agentRunStore) put(id string, result runtime.RunResult) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -104,6 +111,15 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 		return s.tools.Invoke(ctx, ToolInvokeRequest{Name: name, Arguments: args})
 	}
 	exec := runtime.NewExecutor(s.runner, toolFn)
+	exec.SetSubagentFn(func(ctx context.Context, message, instructions string) (string, error) {
+		subSessionID := "subagent-" + generateRunID()
+		_ = s.store.UpsertSession(subSessionID, "subagent", "")
+		reply, err := s.runner.GenerateReply(ctx, agents.Turn{Message: message, History: nil})
+		if err != nil {
+			return "", err
+		}
+		return reply, nil
+	})
 	result := exec.Run(r.Context(), runtime.RunOptions{
 		SessionID:    req.SessionID,
 		Message:      req.Message,
@@ -171,6 +187,68 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "approved": req.Approved})
+}
+
+// handleAgentRunGet retrieves a stored run result by runId.
+func (s *Server) handleAgentRunGet(w http.ResponseWriter, r *http.Request) {
+	runID := strings.TrimSpace(r.PathValue("runId"))
+	if runID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "runId is required"})
+		return
+	}
+	entry, ok := globalRunStore.get(runID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "run not found"})
+		return
+	}
+	errStr := ""
+	if entry.result.Err != nil {
+		errStr = entry.result.Err.Error()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"runId":     runID,
+		"reply":     entry.result.FinalText,
+		"turns":     len(entry.result.Turns),
+		"error":     errStr,
+		"createdAt": entry.createdAt,
+	})
+}
+
+// handleBulkDeleteSessions deletes sessions matching criteria.
+// Body: {"olderThan":"24h"} or {"ids":["a","b"]}.
+func (s *Server) handleBulkDeleteSessions(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OlderThan string   `json:"olderThan"` // Go duration string e.g. "24h"
+		IDs       []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	var removed int
+	if len(req.IDs) > 0 {
+		for _, id := range req.IDs {
+			if ok, _ := s.store.Delete(id); ok {
+				removed++
+			}
+		}
+	} else if req.OlderThan != "" {
+		dur, err := time.ParseDuration(req.OlderThan)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid olderThan duration: " + err.Error()})
+			return
+		}
+		n, err := s.store.Cleanup(dur)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		removed = n
+	} else {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provide ids or olderThan"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
 }
 
 var runIDMu sync.Mutex

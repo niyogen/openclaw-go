@@ -23,7 +23,7 @@ func (r *OpenAIRunner) StreamReply(ctx context.Context, turn Turn, out chan<- St
 		out <- StreamChunk{Err: fmt.Errorf("openai: cannot send request with no messages")}
 		return
 	}
-	reqBody := openAIChatRequest{Model: r.model, Messages: messages}
+	reqBody := openAIChatRequest{Model: r.model, Messages: messages, MaxTokens: turn.MaxTokens}
 	// Add stream: true to the request body.
 	type streamRequest struct {
 		openAIChatRequest

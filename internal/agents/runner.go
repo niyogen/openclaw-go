@@ -14,8 +14,9 @@ type HistoryMessage struct {
 }
 
 type Turn struct {
-	Message string
-	History []HistoryMessage
+	Message   string
+	History   []HistoryMessage
+	MaxTokens int
 }
 
 type Runner interface {

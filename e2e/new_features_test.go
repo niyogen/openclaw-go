@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -287,7 +286,7 @@ func TestE2E_PluginLoader_ManifestDiscovery(t *testing.T) {
 		"version": "1.0.0",
 		"description": "E2E test plugin",
 		"routes": [{"method":"GET","path":"/plugins/test-plugin/ping"}],
-		"tools": [{"name":"test.ping","description":"ping tool","endpoint":"http://localhost:9999/ping"}]
+		"tools": [{"name":"test.ping","description":"ping tool","endpoint":"https://example.com/ping"}]
 	}`
 	if err := os.WriteFile(filepath.Join(plugDir, "plugin.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
@@ -316,14 +315,9 @@ func TestE2E_PluginRegisteredInGateway(t *testing.T) {
 	if err := os.MkdirAll(plugDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Plugin exposes a route that answers with a fixed response.
-	fakeBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"pong":true}`))
-	}))
-	defer fakeBackend.Close()
-
-	manifest := `{"name":"my-plugin","version":"1.0.0","description":"inline test","routes":[{"method":"GET","path":"/plugins/my-plugin/ping","forward":"` + fakeBackend.URL + `"}],"tools":[]}`
+	// No Forward URL: private/loopback hosts are rejected by the SSRF check;
+	// this test only verifies plugin registration, not proxy forwarding.
+	manifest := `{"name":"my-plugin","version":"1.0.0","description":"inline test","routes":[{"method":"GET","path":"/plugins/my-plugin/ping"}],"tools":[]}`
 	if err := os.WriteFile(filepath.Join(plugDir, "plugin.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
