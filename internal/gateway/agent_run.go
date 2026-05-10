@@ -292,9 +292,16 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if runID != "" {
+		// Build a RunResult that mirrors what the blocking path stores so that
+		// GET /agent/run/{runId} can report errors and turn counts correctly.
 		result := runtime.RunResult{FinalText: finalReply}
 		if errStr != "" {
+			result.Err = fmt.Errorf("%s", errStr)
 			result.FinalText = ""
+		}
+		// Populate Turns with placeholder records to preserve turn count.
+		for i := 0; i < turnCount; i++ {
+			result.Turns = append(result.Turns, runtime.TurnResult{Turn: i + 1})
 		}
 		globalRunStore.put(runID, result)
 	}

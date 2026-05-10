@@ -373,6 +373,8 @@ type sessionSummary struct {
 	ID           string    `json:"id"`
 	Channel      string    `json:"channel"`
 	Target       string    `json:"target"`
+	Provider     string    `json:"provider,omitempty"`
+	Model        string    `json:"model,omitempty"`
 	MessageCount int       `json:"messageCount"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
@@ -441,6 +443,8 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			ID:           sess.ID,
 			Channel:      sess.Channel,
 			Target:       sess.Target,
+			Provider:     sess.Provider,
+			Model:        sess.Model,
 			MessageCount: len(sess.Messages),
 			UpdatedAt:    sess.UpdatedAt,
 		})
@@ -910,6 +914,8 @@ func (s *Server) dispatchRPC(
 				ID:           sess.ID,
 				Channel:      sess.Channel,
 				Target:       sess.Target,
+				Provider:     sess.Provider,
+				Model:        sess.Model,
 				MessageCount: len(sess.Messages),
 				UpdatedAt:    sess.UpdatedAt,
 			})
@@ -1750,8 +1756,11 @@ func (s *Server) dispatchRPC(
 		var p struct {
 			NodeID string `json:"nodeId"`
 		}
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.NodeID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "nodeId is required"}
 		}
 		_, _ = s.topo.RemoveNode(p.NodeID)
 		return map[string]any{"ok": true, "nodeId": p.NodeID}, nil
@@ -2263,7 +2272,9 @@ func (s *Server) dispatchRPC(
 		if len(params) == 0 {
 			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
-		_ = json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
 		if err := s.store.Reset(p.SessionID); err != nil {
 			return nil, &rpcError{Code: -32001, Message: err.Error()}
 		}
@@ -2273,7 +2284,9 @@ func (s *Server) dispatchRPC(
 			MaxAge string `json:"maxAge"`
 		}
 		if len(params) > 0 {
-			json.Unmarshal(params, &p) //nolint:errcheck
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, &rpcError{Code: -32602, Message: "invalid params"}
+			}
 		}
 		maxAge := 24 * time.Hour
 		if d, err := time.ParseDuration(p.MaxAge); err == nil && d > 0 {
@@ -2307,7 +2320,9 @@ func (s *Server) dispatchRPC(
 	case "sessions.messages.subscribe":
 		var p sessionIDParams
 		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, &rpcError{Code: -32602, Message: "invalid params"}
+			}
 		}
 		evCh, unsub := s.bus.Subscribe(p.SessionID)
 		defer unsub()
