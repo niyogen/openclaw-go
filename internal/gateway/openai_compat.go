@@ -313,6 +313,16 @@ func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request)
 	s.handleV1ChatBlocking(w, ctx, model, currentMsg, turn)
 }
 
+// countTokensApprox counts whitespace-delimited words across the full turn
+// (history + current message) as a cheap approximation of prompt tokens.
+func countTokensApprox(turn agents.Turn) int {
+	n := len(strings.Fields(turn.Message))
+	for _, h := range turn.History {
+		n += len(strings.Fields(h.Content))
+	}
+	return n
+}
+
 func (s *Server) handleV1ChatBlocking(
 	w http.ResponseWriter,
 	ctx context.Context,
@@ -341,9 +351,9 @@ func (s *Server) handleV1ChatBlocking(
 			"finish_reason": "stop",
 		}},
 		"usage": map[string]int{
-			"prompt_tokens":     len(strings.Fields(prompt)),
+			"prompt_tokens":     countTokensApprox(turn),
 			"completion_tokens": len(strings.Fields(reply)),
-			"total_tokens":      len(strings.Fields(prompt)) + len(strings.Fields(reply)),
+			"total_tokens":      countTokensApprox(turn) + len(strings.Fields(reply)),
 		},
 	})
 }

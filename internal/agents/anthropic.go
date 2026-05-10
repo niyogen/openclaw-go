@@ -163,6 +163,9 @@ func (r *AnthropicRunner) GenerateReply(ctx context.Context, turn Turn) (string,
 	}
 
 	messages := buildAnthropicMessages(turn)
+	if len(messages) == 0 {
+		return "", fmt.Errorf("anthropic: cannot send request with no messages")
+	}
 
 	reqBody := anthropicRequest{
 		Model:     r.model,

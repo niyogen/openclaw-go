@@ -148,11 +148,12 @@ func (s *Store) Get(sessionID string) (Session, bool) {
 
 // deepCopyMessages returns an independently allocated copy of a message slice
 // including nested Attachments and ToolCall pointers.
+// Always returns a non-nil slice so callers serialise it as [] not null.
 func deepCopyMessages(msgs []Message) []Message {
-	if len(msgs) == 0 {
-		return nil
-	}
 	out := make([]Message, len(msgs))
+	if len(msgs) == 0 {
+		return out
+	}
 	for i, m := range msgs {
 		cm := m
 		if len(m.Attachments) > 0 {
