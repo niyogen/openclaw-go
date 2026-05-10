@@ -439,6 +439,7 @@ func (s *Server) handleV1ChatStream(
 			}
 			raw, _ := json.Marshal(errMsg)
 			fmt.Fprintf(w, "data: %s\n\n", raw)
+			fmt.Fprintf(w, "data: [DONE]\n\n") // always terminate SSE stream
 			flusher.Flush()
 			return
 		}

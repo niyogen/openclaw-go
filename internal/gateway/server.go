@@ -1266,7 +1266,9 @@ func (s *Server) dispatchRPC(
 			var p struct {
 				Provider string `json:"provider"`
 			}
-			_ = json.Unmarshal(params, &p)
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, &rpcError{Code: -32602, Message: "invalid params"}
+			}
 			providerFilter = p.Provider
 		}
 		if strings.TrimSpace(providerFilter) == "" {
@@ -1278,7 +1280,9 @@ func (s *Server) dispatchRPC(
 			Provider string `json:"provider"`
 		}
 		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, &rpcError{Code: -32602, Message: "invalid params"}
+			}
 		}
 		if strings.TrimSpace(p.Provider) == "" {
 			p.Provider = "echo"
@@ -1610,8 +1614,14 @@ func (s *Server) dispatchRPC(
 			SessionID string `json:"sessionId"`
 			TimeoutMs int    `json:"timeoutMs"`
 		}
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
 		}
 		if p.TimeoutMs <= 0 {
 			p.TimeoutMs = 5000
@@ -1622,7 +1632,8 @@ func (s *Server) dispatchRPC(
 		for {
 			select {
 			case ev := <-evCh:
-				if ev.Type == EventAgentReply {
+				// Only return events for the requested session to prevent cross-session leaks.
+				if ev.Type == EventAgentReply && ev.SessionID == p.SessionID {
 					return map[string]any{"event": ev}, nil
 				}
 			case <-deadline:
@@ -2234,7 +2245,9 @@ func (s *Server) dispatchRPC(
 		if len(params) == 0 {
 			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
-		_ = json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
 		if p.N <= 0 {
 			p.N = 5
 		}
@@ -2248,7 +2261,9 @@ func (s *Server) dispatchRPC(
 		if len(params) == 0 {
 			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
-		_ = json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
 		desc, ok := s.store.Describe(p.SessionID)
 		if !ok {
 			return nil, &rpcError{Code: -32001, Message: "session not found"}
@@ -2262,7 +2277,9 @@ func (s *Server) dispatchRPC(
 		if len(params) == 0 {
 			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
-		_ = json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
 		if err := s.store.Abort(p.SessionID, p.Reason); err != nil {
 			return nil, &rpcError{Code: -32001, Message: err.Error()}
 		}
