@@ -4,6 +4,7 @@ package logstore
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -108,7 +109,7 @@ func (s *Store) load() error {
 	}
 	var entries []Entry
 	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil // corrupt file – start fresh
+		return fmt.Errorf("logstore: corrupt data file %s: %w", s.path, err)
 	}
 	s.entries = entries
 	if len(s.entries) > 0 {

@@ -180,6 +180,26 @@ func (s *Store) ExecuteJob(ctx context.Context, job Job) Run {
 	return run
 }
 
+// TryLockRunning marks a job as running; returns false if already running.
+// Used by manual triggers (e.g. cron.run RPC) to participate in the same
+// overlap guard as the scheduler.
+func (s *Store) TryLockRunning(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running[id] {
+		return false
+	}
+	s.running[id] = true
+	return true
+}
+
+// UnlockRunning clears the running flag for a job.
+func (s *Store) UnlockRunning(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.running, id)
+}
+
 // Get returns a single job by id.
 func (s *Store) Get(id string) (Job, bool) {
 	s.mu.Lock()

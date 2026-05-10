@@ -782,6 +782,8 @@ func (s *Server) dispatchRPC(
 		if !deleted {
 			return nil, &rpcError{Code: -32001, Message: "session not found"}
 		}
+		s.bus.Publish(GatewayEvent{Type: EventSessionDeleted, SessionID: p.SessionID})
+		s.logs.Append(logstore.LevelInfo, "sessions", "session deleted: "+p.SessionID, nil)
 		return map[string]any{"ok": true, "deleted": p.SessionID}, nil
 	case "plugins.list":
 		if s.registry == nil {
@@ -806,19 +808,43 @@ func (s *Server) dispatchRPC(
 		if req.Policy != nil {
 			policy = *req.Policy
 		}
+		_ = s.store.UpsertSession(req.SessionID, "cli", "")
+		// Snapshot history BEFORE appending user message (same as handleAgentRun).
+		var rpcHistory []agents.HistoryMessage
+		if sess, ok := s.store.Get(req.SessionID); ok {
+			for _, m := range sess.Messages {
+				rpcHistory = append(rpcHistory, agents.HistoryMessage{
+					Role:    string(m.Role),
+					Content: m.Content,
+				})
+			}
+		}
+		_ = s.store.AppendMessage(req.SessionID, sessions.Message{
+			Role:      sessions.RoleUser,
+			Content:   req.Message,
+			CreatedAt: time.Now().UTC(),
+		})
 		toolFn := func(fctx context.Context, name string, args map[string]any) (any, error) {
 			return s.tools.Invoke(fctx, ToolInvokeRequest{Name: name, Arguments: args})
 		}
 		exec := runtime.NewExecutor(s.runner, toolFn)
 		result := exec.Run(ctx, runtime.RunOptions{
-			SessionID: req.SessionID,
-			Message:   req.Message,
-			Policy:    policy,
-			Approvals: s.approvals,
+			SessionID:    req.SessionID,
+			Message:      req.Message,
+			History:      rpcHistory,
+			Instructions: req.Instructions,
+			Policy:       policy,
+			Approvals:    s.approvals,
 		})
 		var errStr string
 		if result.Err != nil {
 			errStr = result.Err.Error()
+		} else if result.FinalText != "" {
+			_ = s.store.AppendMessage(req.SessionID, sessions.Message{
+				Role:      sessions.RoleAssistant,
+				Content:   result.FinalText,
+				CreatedAt: time.Now().UTC(),
+			})
 		}
 		return map[string]any{
 			"reply": result.FinalText,
@@ -888,7 +914,13 @@ func (s *Server) dispatchRPC(
 		if !ok {
 			return nil, &rpcError{Code: -32001, Message: "cron job not found"}
 		}
-		go func() { s.cron.ExecuteJob(context.Background(), job) }()
+		if !s.cron.TryLockRunning(p.ID) {
+			return nil, &rpcError{Code: -32000, Message: "job is already running"}
+		}
+		go func() {
+			defer s.cron.UnlockRunning(p.ID)
+			s.cron.ExecuteJob(context.Background(), job)
+		}()
 		return map[string]any{"ok": true, "id": p.ID, "message": "job triggered"}, nil
 	case "cron.runs":
 		var p struct {
@@ -897,6 +929,9 @@ func (s *Server) dispatchRPC(
 		}
 		if len(params) > 0 {
 			_ = json.Unmarshal(params, &p)
+		}
+		if strings.TrimSpace(p.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "id is required"}
 		}
 		if p.Limit <= 0 {
 			p.Limit = 50
@@ -1083,7 +1118,7 @@ func (s *Server) dispatchRPC(
 				"host":        s.host,
 				"address":     s.Address(),
 				"version":     Version,
-				"authEnabled": strings.TrimSpace(s.authToken) != "",
+				"authEnabled": strings.TrimSpace(s.authToken) != "" || strings.TrimSpace(s.password) != "",
 			},
 			"tools":    s.tools.List(),
 			"plugins":  s.registry.Names(),
@@ -1142,7 +1177,7 @@ func (s *Server) dispatchRPC(
 	// ── doctor.* ───────────────────────────────────────────────────────────
 	case "doctor.check":
 		checks := map[string]any{}
-		checks["sessionStore"] = map[string]any{"ok": true, "sessions": len(s.store.List())}
+		checks["sessionStore"] = map[string]any{"ok": true, "sessions": s.store.Count()}
 		checks["runner"] = map[string]any{"ok": s.runner != nil}
 		checks["eventBus"] = map[string]any{"ok": s.bus != nil}
 		checks["rateLimiter"] = map[string]any{"ok": s.rateLimiter != nil}
@@ -1191,13 +1226,14 @@ func (s *Server) dispatchRPC(
 
 	// ── usage.* ─────────────────────────────────────────────────────────────
 	case "usage.stats", "usage.status":
+		// Compute aggregate message count without holding full Session payloads.
 		sessionList := s.store.List()
 		totalMessages := 0
 		for _, sess := range sessionList {
 			totalMessages += len(sess.Messages)
 		}
 		return map[string]any{
-			"sessions":      len(sessionList),
+			"sessions":      s.store.Count(),
 			"totalMessages": totalMessages,
 			"cronJobs":      len(s.cron.List()),
 			"hooks":         len(s.hooks.List()),
@@ -1283,7 +1319,7 @@ func (s *Server) dispatchRPC(
 		}
 		return map[string]any{
 			"ok":            true,
-			"sessions":      len(sessionList),
+			"sessions":      s.store.Count(),
 			"totalMessages": totalMsgs,
 			"logEntries":    len(s.logs.List("", "", 0)),
 		}, nil
@@ -1431,8 +1467,11 @@ func (s *Server) dispatchRPC(
 			ID       string `json:"id"`
 			Approved bool   `json:"approved"`
 		}
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "id is required"}
 		}
 		if err := s.approvals.Decide(p.ID, p.Approved); err != nil {
 			return nil, &rpcError{Code: -32001, Message: err.Error()}
@@ -1790,7 +1829,7 @@ func (s *Server) dispatchRPC(
 		}()
 		return map[string]any{"ok": true, "message": "gateway shutting down for restart"}, nil
 	case "gateway.restart.preflight":
-		return map[string]any{"ok": true, "canRestart": true, "pendingSessions": len(s.store.List())}, nil
+		return map[string]any{"ok": true, "canRestart": true, "pendingSessions": s.store.Count()}, nil
 	case "gateway.stop":
 		go func() {
 			time.Sleep(200 * time.Millisecond)
@@ -1853,7 +1892,12 @@ func (s *Server) dispatchRPC(
 		if len(params) == 0 {
 			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
-		_ = json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
 		if err := s.store.Create(p.SessionID, p.Channel, p.Target); err != nil {
 			return nil, &rpcError{Code: -32000, Message: err.Error()}
 		}

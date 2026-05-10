@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"openclaw-go/internal/fileutil"
 )
 
 type GatewayConfig struct {
@@ -421,5 +423,5 @@ func Save(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0o644)
+	return fileutil.WriteFile(path, raw, 0o644)
 }

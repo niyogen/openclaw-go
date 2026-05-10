@@ -111,6 +111,13 @@ func (s *Store) AppendMessage(sessionID string, msg Message) error {
 	return s.saveLocked()
 }
 
+// Count returns the number of sessions without loading message payloads.
+func (s *Store) Count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sessions)
+}
+
 func (s *Store) List() []Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()

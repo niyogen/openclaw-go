@@ -171,7 +171,7 @@ func (s *Store) load() error {
 	}
 	var hooks []Hook
 	if err := json.Unmarshal(raw, &hooks); err != nil {
-		return nil
+		return fmt.Errorf("hookstore: corrupt data file %s: %w", s.path, err)
 	}
 	for i := range hooks {
 		h := hooks[i]
