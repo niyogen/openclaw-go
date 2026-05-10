@@ -1,9 +1,42 @@
 package channels
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestTelegramBuildWebhookHandler_OnHandlerError(t *testing.T) {
+	tg := NewTelegramChannel("dummy-token", "")
+	var sawCh string
+	var sawErr error
+	cfg := &WebhookInboundConfig{
+		OnHandlerError: func(ch string, err error, attrs map[string]any) {
+			sawCh = ch
+			sawErr = err
+		},
+	}
+	h := tg.BuildWebhookHandler("", func(context.Context, InboundMessage) error {
+		return errors.New("tg inbound failed")
+	}, cfg)
+
+	rec := httptest.NewRecorder()
+	body := `{"update_id":1,"message":{"text":"hi","from":{"is_bot":false},"chat":{"id":42}}}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP %d", rec.Code)
+	}
+	if sawErr == nil || sawErr.Error() != "tg inbound failed" || sawCh != "telegram" {
+		t.Fatalf("observer ch=%q err=%v", sawCh, sawErr)
+	}
+}
 
 func TestMessagesFromUpdate_CallbackEmptyData(t *testing.T) {
 	raw := []byte(`{

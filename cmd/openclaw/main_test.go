@@ -1,6 +1,42 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"openclaw-go/internal/config"
+)
+
+func TestValidateGatewayChannelConfig_WhatsAppVerifyToken(t *testing.T) {
+	t.Run("enabled without verify token", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.Channels.WhatsApp.Enabled = true
+		cfg.Channels.WhatsApp.VerifyToken = ""
+		err := validateGatewayChannelConfig(cfg)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "verify token") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	t.Run("enabled with verify token", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.Channels.WhatsApp.Enabled = true
+		cfg.Channels.WhatsApp.VerifyToken = "secret"
+		if err := validateGatewayChannelConfig(cfg); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("disabled without verify token ok", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.Channels.WhatsApp.Enabled = false
+		cfg.Channels.WhatsApp.VerifyToken = ""
+		if err := validateGatewayChannelConfig(cfg); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
 
 func TestParseBoolArg(t *testing.T) {
 	for _, tc := range []struct {

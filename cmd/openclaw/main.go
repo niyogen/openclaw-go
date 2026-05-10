@@ -747,7 +747,19 @@ func printUsage() {
 	fmt.Println("  openclaw agent <message>")
 }
 
+// validateGatewayChannelConfig returns an error if enabled channels are missing
+// required settings (fail fast before opening stores or binding listeners).
+func validateGatewayChannelConfig(cfg config.Config) error {
+	if cfg.Channels.WhatsApp.Enabled && strings.TrimSpace(cfg.Channels.WhatsApp.VerifyToken) == "" {
+		return fmt.Errorf("whatsapp is enabled but verify token is empty: set channels.whatsapp.verifyToken or WHATSAPP_VERIFY_TOKEN")
+	}
+	return nil
+}
+
 func runGateway(cfg config.Config) error {
+	if err := validateGatewayChannelConfig(cfg); err != nil {
+		return err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -964,10 +976,6 @@ func runGateway(cfg config.Config) error {
 	}
 
 	server.ApplyExtensionTools(cfg)
-
-	if cfg.Channels.WhatsApp.Enabled && strings.TrimSpace(cfg.Channels.WhatsApp.VerifyToken) == "" {
-		return fmt.Errorf("whatsapp is enabled but verify token is empty: set channels.whatsapp.verifyToken or WHATSAPP_VERIFY_TOKEN")
-	}
 
 	if cfg.Channels.Telegram.Enabled {
 		tgObs := &channels.WebhookInboundConfig{

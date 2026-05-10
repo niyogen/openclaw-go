@@ -2,6 +2,7 @@ package channels
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,36 @@ func TestReadWebhookBody_MaxBytes(t *testing.T) {
 	}
 	if !errBodyTooLarge(err) {
 		t.Fatalf("want body-too-large error, got %v", err)
+	}
+}
+
+func TestBuildWhatsAppWebhookHandler_OnHandlerError(t *testing.T) {
+	var sawCh string
+	var sawErr error
+	cfg := &WebhookInboundConfig{
+		OnHandlerError: func(ch string, err error, attrs map[string]any) {
+			sawCh = ch
+			sawErr = err
+			if attrs["sessionId"] != "whatsapp:1" {
+				t.Errorf("attrs sessionId = %v", attrs["sessionId"])
+			}
+		},
+	}
+	h := BuildWhatsAppWebhookHandler("vt", "", func(context.Context, InboundMessage) error {
+		return errors.New("inbound failed")
+	}, cfg)
+
+	rec := httptest.NewRecorder()
+	payload := `{"entry":[{"changes":[{"value":{"messages":[{"type":"text","from":"1","text":{"body":"hi"}}]}}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	h(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP %d", rec.Code)
+	}
+	if sawErr == nil || sawErr.Error() != "inbound failed" || sawCh != "whatsapp" {
+		t.Fatalf("observer ch=%q err=%v", sawCh, sawErr)
 	}
 }
 
