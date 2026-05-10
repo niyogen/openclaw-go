@@ -88,6 +88,7 @@ func (e *Executor) RunStream(ctx context.Context, opts RunOptions, events chan<-
 		if len(toolCalls) == 0 {
 			// Plain-text final reply — stream rune-by-rune.
 			if !streamReplyRunes(ctx, reply, events) {
+				send(RunEvent{Type: RunEventError, Error: ctx.Err().Error()})
 				return
 			}
 			send(RunEvent{Type: RunEventDone, Reply: reply, Turns: turn + 1, RunID: runID})

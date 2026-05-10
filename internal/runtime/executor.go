@@ -194,8 +194,11 @@ func (e *Executor) Run(ctx context.Context, opts RunOptions) RunResult {
 	}
 }
 
-// TruncateHistory trims history to at most maxMessages entries while always
-// preserving leading system messages.  Oldest non-system messages are dropped.
+// TruncateHistory trims history to at most maxMessages entries.
+// Leading system messages are always kept first; if there are more system
+// messages than the cap allows, only the first maxMessages system messages
+// are kept and the non-system portion is dropped entirely.
+// Oldest non-system messages are dropped to stay within the cap.
 func TruncateHistory(history []agents.HistoryMessage, maxMessages int) []agents.HistoryMessage {
 	if maxMessages <= 0 || len(history) <= maxMessages {
 		return history
@@ -206,10 +209,11 @@ func TruncateHistory(history []agents.HistoryMessage, maxMessages int) []agents.
 		sys = append(sys, rest[0])
 		rest = rest[1:]
 	}
-	keep := maxMessages - len(sys)
-	if keep <= 0 {
-		return sys
+	// Clamp system messages to the cap itself.
+	if len(sys) >= maxMessages {
+		return sys[:maxMessages]
 	}
+	keep := maxMessages - len(sys)
 	if len(rest) > keep {
 		rest = rest[len(rest)-keep:]
 	}

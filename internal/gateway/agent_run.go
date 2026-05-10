@@ -218,16 +218,21 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().UTC(),
 	})
 
+	// Inherit server-wide context window default when request doesn't specify one.
+	if policy.MaxContextMessages == 0 && s.defaultMaxContextMsgs > 0 {
+		policy.MaxContextMessages = s.defaultMaxContextMsgs
+	}
+
 	toolFn := func(ctx context.Context, name string, args map[string]any) (any, error) {
 		return s.tools.Invoke(ctx, ToolInvokeRequest{Name: name, Arguments: args})
 	}
-	exec := runtime.NewExecutor(s.runner, toolFn)
+	exec := runtime.NewExecutor(s.runnerForSession(req.SessionID), toolFn)
 	exec.SetSubagentFn(func(ctx context.Context, message, instructions string) (string, error) {
 		var subHistory []agents.HistoryMessage
 		if strings.TrimSpace(instructions) != "" {
 			subHistory = []agents.HistoryMessage{{Role: "system", Content: instructions}}
 		}
-		reply, err := s.runner.GenerateReply(ctx, agents.Turn{Message: message, History: subHistory})
+		reply, err := s.runnerForSession(req.SessionID).GenerateReply(ctx, agents.Turn{Message: message, History: subHistory})
 		if err != nil {
 			return "", err
 		}

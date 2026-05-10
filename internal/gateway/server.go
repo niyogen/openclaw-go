@@ -168,21 +168,28 @@ func (s *Server) SetRunnerFactory(fn func(provider, model string) agents.Runner)
 
 // runnerForSession returns a session-specific Runner when the session has a
 // provider/model override, otherwise returns the global s.runner.
+// The cache lookup and session read happen under the same lock to avoid
+// TOCTOU races where SetSessionModel changes the model between the Get and
+// the cache insert.
 func (s *Server) runnerForSession(sessionID string) agents.Runner {
 	if s.runnerFactory == nil {
 		return s.runner
 	}
+	s.runnerCacheMu.Lock()
+	defer s.runnerCacheMu.Unlock()
+
 	sess, ok := s.store.Get(sessionID)
 	if !ok || (sess.Provider == "" && sess.Model == "") {
 		return s.runner
 	}
 	key := sess.Provider + ":" + sess.Model
-	s.runnerCacheMu.Lock()
-	defer s.runnerCacheMu.Unlock()
 	if r, exists := s.runnerCache[key]; exists {
 		return r
 	}
 	r := s.runnerFactory(sess.Provider, sess.Model)
+	if r == nil {
+		return s.runner // factory returned nil — fall back to default
+	}
 	s.runnerCache[key] = r
 	return r
 }
@@ -1008,13 +1015,13 @@ func (s *Server) dispatchRPC(
 		toolFn := func(fctx context.Context, name string, args map[string]any) (any, error) {
 			return s.tools.Invoke(fctx, ToolInvokeRequest{Name: name, Arguments: args})
 		}
-		exec := runtime.NewExecutor(s.runner, toolFn)
+		exec := runtime.NewExecutor(s.runnerForSession(req.SessionID), toolFn)
 		exec.SetSubagentFn(func(fctx context.Context, message, instructions string) (string, error) {
 			var subHistory []agents.HistoryMessage
 			if strings.TrimSpace(instructions) != "" {
 				subHistory = []agents.HistoryMessage{{Role: "system", Content: instructions}}
 			}
-			return s.runner.GenerateReply(fctx, agents.Turn{Message: message, History: subHistory})
+			return s.runnerForSession(req.SessionID).GenerateReply(fctx, agents.Turn{Message: message, History: subHistory})
 		})
 		result := exec.Run(ctx, runtime.RunOptions{
 			SessionID:    req.SessionID,
@@ -1946,13 +1953,13 @@ func (s *Server) dispatchRPC(
 		toolFn := func(fctx context.Context, name string, args map[string]any) (any, error) {
 			return s.tools.Invoke(fctx, ToolInvokeRequest{Name: name, Arguments: args})
 		}
-		exec := runtime.NewExecutor(s.runner, toolFn)
+		exec := runtime.NewExecutor(s.runnerForSession(p.SessionID), toolFn)
 		exec.SetSubagentFn(func(fctx context.Context, message, instructions string) (string, error) {
 			var subHistory []agents.HistoryMessage
 			if strings.TrimSpace(instructions) != "" {
 				subHistory = []agents.HistoryMessage{{Role: "system", Content: instructions}}
 			}
-			reply, err := s.runner.GenerateReply(fctx, agents.Turn{Message: message, History: subHistory})
+			reply, err := s.runnerForSession(p.SessionID).GenerateReply(fctx, agents.Turn{Message: message, History: subHistory})
 			if err != nil {
 				return "", err
 			}

@@ -344,6 +344,25 @@ func TestTruncateHistoryPreservesSystem(t *testing.T) {
 	}
 }
 
+func TestTruncateHistoryCapOnSystemMessages(t *testing.T) {
+	// More system messages than the cap — must not exceed maxMessages.
+	h := []agents.HistoryMessage{
+		{Role: "system", Content: "s1"},
+		{Role: "system", Content: "s2"},
+		{Role: "system", Content: "s3"},
+		{Role: "user", Content: "u1"},
+	}
+	out := TruncateHistory(h, 2)
+	if len(out) != 2 {
+		t.Fatalf("expected exactly 2 (the cap), got %d", len(out))
+	}
+	for _, m := range out {
+		if m.Role != "system" {
+			t.Fatalf("expected only system messages, got role %s", m.Role)
+		}
+	}
+}
+
 func TestTruncateHistoryEmpty(t *testing.T) {
 	out := TruncateHistory(nil, 5)
 	if out != nil {
