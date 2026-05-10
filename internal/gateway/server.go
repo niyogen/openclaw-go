@@ -1,4 +1,4 @@
-package gateway
+﻿package gateway
 
 import (
 	"context"
@@ -162,6 +162,16 @@ func (s *Server) SetShutdownTimeout(d time.Duration) {
 	}
 }
 
+// appendLog writes a log entry and publishes it to the event bus so
+// GET /logs/stream subscribers see new entries in real time.
+func (s *Server) appendLog(level logstore.Level, component, message string, meta map[string]any) {
+	_ = s.logs.Append(level, component, message, meta)
+	entries := s.logs.List(string(level), component, 1)
+	if len(entries) > 0 {
+		s.bus.Publish(GatewayEvent{Type: EventLogAppended, Data: entries[len(entries)-1]})
+	}
+}
+
 // SetDefaultMaxContextMessages sets the server-wide default for history
 // truncation. Per-request policy.MaxContextMessages overrides this.
 func (s *Server) SetDefaultMaxContextMessages(n int) {
@@ -305,7 +315,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Start cron scheduler — jobs fire on their schedule and commands are executed.
 	s.cron.StartScheduler(ctx, func(cronCtx context.Context, job cronstore.Job) {
-		s.logs.Append(logstore.LevelInfo, "cron", "job fired: "+job.Name, map[string]any{"id": job.ID, "schedule": job.Schedule})
+		s.appendLog(logstore.LevelInfo, "cron", "job fired: "+job.Name, map[string]any{"id": job.ID, "schedule": job.Schedule})
 		run := s.cron.ExecuteJob(cronCtx, job)
 		s.bus.Publish(GatewayEvent{Type: EventToolInvoked, Data: map[string]any{
 			"cron": job.ID, "command": job.Command, "exitCode": run.ExitCode, "output": run.Output,
@@ -353,6 +363,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("GET /approvals", cors(s.withAuth(s.handleApprovalsList)))
 	s.mux.Handle("POST /approvals/{id}/decide", cors(s.withAuth(withBodyLimit(s.handleApprovalDecide))))
 	s.mux.Handle("GET /logs", cors(s.withAuth(s.handleLogsList)))
+	s.mux.Handle("GET /logs/stream", cors(s.withAuth(s.handleLogsStream)))
 	s.mux.Handle("GET /cron", cors(s.withAuth(s.handleCronList)))
 	s.mux.Handle("POST /cron", cors(s.withAuth(withBodyLimit(s.handleCronAdd))))
 	s.mux.Handle("DELETE /cron/{id}", cors(s.withAuth(s.handleCronDelete)))
@@ -567,7 +578,7 @@ func (s *Server) handleSessionSetModel(w http.ResponseWriter, r *http.Request) {
 	s.runnerCacheMu.Lock()
 	delete(s.runnerCache, req.Provider+":"+req.Model)
 	s.runnerCacheMu.Unlock()
-	_ = s.logs.Append(logstore.LevelInfo, "sessions", "session model set: "+id, //nolint:errcheck
+	s.appendLog(logstore.LevelInfo, "sessions", "session model set: "+id,
 		map[string]any{"provider": req.Provider, "model": req.Model})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sessionId": id, "provider": req.Provider, "model": req.Model})
 }
@@ -583,7 +594,7 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.bus.Publish(GatewayEvent{Type: EventSessionKilled, SessionID: id})
-	s.logs.Append(logstore.LevelInfo, "sessions", "session killed: "+id, nil)
+	s.appendLog(logstore.LevelInfo, "sessions", "session killed: "+id, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "killed": id})
 }
 
@@ -603,7 +614,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.bus.Publish(GatewayEvent{Type: EventSessionDeleted, SessionID: id})
-	s.logs.Append(logstore.LevelInfo, "sessions", "session deleted: "+id, nil)
+	s.appendLog(logstore.LevelInfo, "sessions", "session deleted: "+id, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id})
 }
 
@@ -738,7 +749,7 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 			"sessionId": req.SessionID, "channel": req.Channel,
 		})
 		s.bus.Publish(GatewayEvent{Type: EventSessionCreated, SessionID: req.SessionID})
-		s.logs.Append(logstore.LevelInfo, "sessions", "session created: "+req.SessionID, nil)
+		s.appendLog(logstore.LevelInfo, "sessions", "session created: "+req.SessionID, nil)
 	}
 	// Snapshot history BEFORE appending the current user message so that
 	// buildMessages (which also appends turn.Message) does not duplicate it.
@@ -790,7 +801,7 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 		Target:    req.Target,
 		Message:   reply,
 	}); dispatchErr != nil {
-		s.logs.Append(logstore.LevelWarn, "channels", //nolint:errcheck
+		s.appendLog(logstore.LevelWarn, "channels", //nolint:errcheck
 			"outbound dispatch failed: "+dispatchErr.Error(),
 			map[string]any{"sessionId": req.SessionID, "channel": req.Channel})
 	}
@@ -807,7 +818,7 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 		SessionID: req.SessionID,
 		Data:      map[string]any{"reply": reply},
 	})
-	s.logs.Append(logstore.LevelInfo, "message", "reply sent for "+req.SessionID, nil)
+	s.appendLog(logstore.LevelInfo, "message", "reply sent for "+req.SessionID, nil)
 	return reply, nil
 }
 
@@ -969,7 +980,7 @@ func (s *Server) dispatchRPC(
 			return nil, &rpcError{Code: -32001, Message: err.Error()}
 		}
 		s.bus.Publish(GatewayEvent{Type: EventSessionKilled, SessionID: p.SessionID})
-		s.logs.Append(logstore.LevelInfo, "sessions", "session killed: "+p.SessionID, nil)
+		s.appendLog(logstore.LevelInfo, "sessions", "session killed: "+p.SessionID, nil)
 		return map[string]any{"ok": true, "killed": p.SessionID}, nil
 	case "sessions.delete":
 		var p sessionIDParams
@@ -987,7 +998,7 @@ func (s *Server) dispatchRPC(
 			return nil, &rpcError{Code: -32001, Message: "session not found"}
 		}
 		s.bus.Publish(GatewayEvent{Type: EventSessionDeleted, SessionID: p.SessionID})
-		s.logs.Append(logstore.LevelInfo, "sessions", "session deleted: "+p.SessionID, nil)
+		s.appendLog(logstore.LevelInfo, "sessions", "session deleted: "+p.SessionID, nil)
 		return map[string]any{"ok": true, "deleted": p.SessionID}, nil
 	case "plugins.list":
 		if s.registry == nil {

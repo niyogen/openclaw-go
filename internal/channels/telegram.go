@@ -74,6 +74,53 @@ func (t *TelegramChannel) Send(ctx context.Context, message OutboundMessage) err
 	return nil
 }
 
+// answerCallbackQuery dismisses the loading indicator on an inline keyboard button press.
+func (t *TelegramChannel) answerCallbackQuery(ctx context.Context, callbackQueryID string) error {
+	return telegramAnswerCallbackQuery(ctx, t.client, t.botToken, callbackQueryID)
+}
+
+// BuildWebhookHandler returns an http.HandlerFunc that validates the secret token,
+// decodes incoming Telegram updates (including callback_query), calls handler for
+// each inbound message, and answers callback queries to dismiss loading indicators.
+func (t *TelegramChannel) BuildWebhookHandler(
+	secret string,
+	handler func(context.Context, InboundMessage) error,
+) http.HandlerFunc {
+	trimmedSecret := strings.TrimSpace(secret)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if trimmedSecret != "" {
+			headerSecret := strings.TrimSpace(r.Header.Get("X-Telegram-Bot-Api-Secret-Token"))
+			if headerSecret == "" || headerSecret != trimmedSecret {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var update telegramUpdate
+		if err := json.Unmarshal(body, &update); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		// Answer callback query to dismiss the loading indicator before dispatching.
+		if update.CallbackQuery != nil && update.CallbackQuery.ID != "" {
+			_ = t.answerCallbackQuery(r.Context(), update.CallbackQuery.ID)
+		}
+		for _, inbound := range messagesFromUpdate(update) {
+			_ = handler(r.Context(), inbound)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}
+}
+
 func SetTelegramWebhook(
 	ctx context.Context,
 	botToken string,
@@ -125,6 +172,9 @@ func SetTelegramWebhook(
 	return nil
 }
 
+// BuildTelegramWebhookHandler is a standalone webhook handler that does not answer
+// callback queries (no TelegramChannel instance available). For callback query
+// acknowledgement, use TelegramChannel.BuildWebhookHandler instead.
 func BuildTelegramWebhookHandler(
 	secret string,
 	handler func(context.Context, InboundMessage) error,
@@ -190,19 +240,71 @@ type telegramUpdateResponse struct {
 	Result []telegramUpdate `json:"result"`
 }
 
+// telegramUser represents a Telegram user or bot in From fields.
+type telegramUser struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
+	IsBot    bool   `json:"is_bot"`
+}
+
 type telegramUpdate struct {
-	UpdateID int64             `json:"update_id"`
-	Message  *telegramIncoming `json:"message"`
+	UpdateID      int64                  `json:"update_id"`
+	Message       *telegramIncoming      `json:"message"`
+	CallbackQuery *telegramCallbackQuery `json:"callback_query"`
+}
+
+// telegramCallbackQuery is fired when a user presses an inline keyboard button.
+type telegramCallbackQuery struct {
+	ID      string           `json:"id"`
+	From    telegramUser     `json:"from"`
+	Message *telegramIncoming `json:"message"`
+	Data    string           `json:"data"` // button payload
 }
 
 type telegramIncoming struct {
-	Text string `json:"text"`
-	From struct {
-		IsBot bool `json:"is_bot"`
-	} `json:"from"`
+	Text string       `json:"text"`
+	From telegramUser `json:"from"`
 	Chat struct {
 		ID int64 `json:"id"`
 	} `json:"chat"`
+}
+
+// messagesFromUpdate converts a single telegramUpdate into zero or more InboundMessages.
+func messagesFromUpdate(update telegramUpdate) []InboundMessage {
+	var result []InboundMessage
+
+	if update.Message != nil && !update.Message.From.IsBot {
+		text := strings.TrimSpace(update.Message.Text)
+		if text != "" {
+			chatID := strconv.FormatInt(update.Message.Chat.ID, 10)
+			result = append(result, InboundMessage{
+				SessionID: "telegram:" + chatID,
+				Channel:   "telegram",
+				Target:    chatID,
+				Message:   text,
+			})
+		}
+	}
+
+	if update.CallbackQuery != nil {
+		data := strings.TrimSpace(update.CallbackQuery.Data)
+		if data != "" {
+			var chatID string
+			if update.CallbackQuery.Message != nil {
+				chatID = strconv.FormatInt(update.CallbackQuery.Message.Chat.ID, 10)
+			} else {
+				chatID = strconv.FormatInt(update.CallbackQuery.From.ID, 10)
+			}
+			result = append(result, InboundMessage{
+				SessionID: "telegram:" + chatID,
+				Channel:   "telegram",
+				Target:    chatID,
+				Message:   data,
+			})
+		}
+	}
+
+	return result
 }
 
 func decodeTelegramUpdates(raw []byte) ([]InboundMessage, error) {
@@ -210,22 +312,7 @@ func decodeTelegramUpdates(raw []byte) ([]InboundMessage, error) {
 	if err := json.Unmarshal(raw, &update); err != nil {
 		return nil, err
 	}
-	result := []InboundMessage{}
-	if update.Message == nil || update.Message.From.IsBot {
-		return result, nil
-	}
-	text := strings.TrimSpace(update.Message.Text)
-	if text == "" {
-		return result, nil
-	}
-	chatID := strconv.FormatInt(update.Message.Chat.ID, 10)
-	result = append(result, InboundMessage{
-		SessionID: "telegram:" + chatID,
-		Channel:   "telegram",
-		Target:    chatID,
-		Message:   text,
-	})
-	return result, nil
+	return messagesFromUpdate(update), nil
 }
 
 func (p *TelegramPoller) loop(
@@ -286,23 +373,38 @@ func (p *TelegramPoller) pollOnce(
 		if item.UpdateID >= p.offset {
 			p.offset = item.UpdateID + 1
 		}
-		if item.Message == nil {
-			continue
+		// Answer callback queries immediately to dismiss loading indicators.
+		if item.CallbackQuery != nil && item.CallbackQuery.ID != "" {
+			_ = telegramAnswerCallbackQuery(ctx, p.client, p.botToken, item.CallbackQuery.ID)
 		}
-		if item.Message.From.IsBot {
-			continue
+		for _, inbound := range messagesFromUpdate(item) {
+			_ = handler(ctx, inbound)
 		}
-		text := strings.TrimSpace(item.Message.Text)
-		if text == "" {
-			continue
-		}
-		chatID := strconv.FormatInt(item.Message.Chat.ID, 10)
-		_ = handler(ctx, InboundMessage{
-			SessionID: "telegram:" + chatID,
-			Channel:   "telegram",
-			Target:    chatID,
-			Message:   text,
-		})
+	}
+	return nil
+}
+
+// telegramAnswerCallbackQuery calls the Telegram answerCallbackQuery API to dismiss
+// the loading indicator shown when a user taps an inline keyboard button.
+func telegramAnswerCallbackQuery(ctx context.Context, client *http.Client, botToken, callbackQueryID string) error {
+	payload := map[string]string{"callback_query_id": callbackQueryID}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", botToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("telegram answerCallbackQuery returned %d", resp.StatusCode)
 	}
 	return nil
 }

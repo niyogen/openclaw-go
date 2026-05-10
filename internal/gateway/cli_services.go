@@ -2,11 +2,13 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"openclaw-go/internal/cronstore"
 	"openclaw-go/internal/hookstore"
+	"openclaw-go/internal/logstore"
 )
 
 // ------------------------------------------------------------------
@@ -20,6 +22,60 @@ func (s *Server) handleLogsList(w http.ResponseWriter, r *http.Request) {
 	limit := 100
 	entries := s.logs.List(level, component, limit)
 	writeJSON(w, http.StatusOK, map[string]any{"logs": entries})
+}
+
+// handleLogsStream streams log entries as SSE. It seeds with the last 20
+// entries then pushes new entries in real-time via the EventBus.
+// Query params: ?level=info&component=gateway
+func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming not supported"})
+		return
+	}
+	q := r.URL.Query()
+	filterLevel := strings.TrimSpace(q.Get("level"))
+	filterComponent := strings.TrimSpace(q.Get("component"))
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	// Seed with recent entries.
+	for _, entry := range s.logs.List(filterLevel, filterComponent, 20) {
+		raw, _ := json.Marshal(entry)
+		fmt.Fprintf(w, "data: %s\n\n", raw)
+	}
+	flusher.Flush()
+
+	// Subscribe to new log events.
+	evCh, unsub := s.bus.Subscribe("")
+	defer unsub()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev := <-evCh:
+			if ev.Type != EventLogAppended {
+				continue
+			}
+			entry, ok := ev.Data.(logstore.Entry)
+			if !ok {
+				continue
+			}
+			if filterLevel != "" && string(entry.Level) != filterLevel {
+				continue
+			}
+			if filterComponent != "" && entry.Component != filterComponent {
+				continue
+			}
+			raw, _ := json.Marshal(entry)
+			fmt.Fprintf(w, "data: %s\n\n", raw)
+			flusher.Flush()
+		}
+	}
 }
 
 // ------------------------------------------------------------------

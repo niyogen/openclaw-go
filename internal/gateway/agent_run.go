@@ -1,4 +1,4 @@
-package gateway
+﻿package gateway
 
 import (
 	"context"
@@ -156,7 +156,7 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 	s.hooks.Emit(hookstore.EventAgentRunComplete, map[string]any{
 		"runId": runID, "sessionId": req.SessionID, "turns": len(result.Turns), "error": errStr,
 	})
-	s.logs.Append(logstore.LevelInfo, "agent", "run complete: "+runID, map[string]any{"turns": len(result.Turns)})
+	s.appendLog(logstore.LevelInfo, "agent", "run complete: "+runID, map[string]any{"turns": len(result.Turns)})
 
 	writeJSON(w, http.StatusOK, agentRunResponse{
 		RunID:     runID,
@@ -311,7 +311,7 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 	s.hooks.Emit(hookstore.EventAgentRunComplete, map[string]any{
 		"runId": streamRunID, "sessionId": req.SessionID, "turns": turnCount, "error": errStr,
 	})
-	s.logs.Append(logstore.LevelInfo, "agent", "stream run complete: "+streamRunID, map[string]any{"turns": turnCount}) //nolint:errcheck
+	s.appendLog(logstore.LevelInfo, "agent", "stream run complete: "+streamRunID, map[string]any{"turns": turnCount}) //nolint:errcheck
 }
 
 func (s *Server) handleApprovalsList(w http.ResponseWriter, _ *http.Request) {
@@ -388,7 +388,7 @@ func (s *Server) handleBulkDeleteSessions(w http.ResponseWriter, r *http.Request
 			if ok, _ := s.store.Delete(id); ok {
 				removed++
 				s.bus.Publish(GatewayEvent{Type: EventSessionDeleted, SessionID: id})
-				s.logs.Append(logstore.LevelInfo, "sessions", "session deleted (bulk): "+id, nil) //nolint:errcheck
+				s.appendLog(logstore.LevelInfo, "sessions", "session deleted (bulk): "+id, nil) //nolint:errcheck
 			}
 		}
 	} else if req.OlderThan != "" {

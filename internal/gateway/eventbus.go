@@ -27,6 +27,9 @@ const (
 	EventHookFired    EventType = "hook.fired"    // event hook dispatched
 	EventPluginLoaded EventType = "plugin.loaded" // plugin loaded at startup
 
+	// Log events
+	EventLogAppended EventType = "log.appended" // new log entry written
+
 	// System events
 	EventGatewayShutdown  EventType = "gateway.shutdown" // gateway stopping
 	EventGatewayRestart   EventType = "gateway.restart"  // gateway restarting
