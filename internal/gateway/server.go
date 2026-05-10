@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"openclaw-go/internal/agents"
@@ -44,6 +45,7 @@ type Server struct {
 	secrets        *secretstore.Store
 	rateLimiter    *RateLimiter
 	bus            *EventBus
+	shutdownMu     sync.Mutex
 	shutdownFn     func()
 	topo           *topology.Store
 	workspace      *agents.Workspace
@@ -120,6 +122,7 @@ func (s *Server) Address() string {
 func (s *Server) Bus() *EventBus { return s.bus }
 
 // SetAuth configures additional auth modes (password, trusted proxies).
+// Must be called before Run().
 func (s *Server) SetAuth(password string, trustedProxies []string) {
 	s.password = strings.TrimSpace(password)
 	s.trustedProxies = trustedProxies
@@ -190,7 +193,9 @@ func (s *Server) Run(ctx context.Context) error {
 	// Wire shutdown function so gateway.stop RPC works.
 	ctx, cancelFromRPC := context.WithCancel(ctx)
 	defer cancelFromRPC()
+	s.shutdownMu.Lock()
 	s.shutdownFn = cancelFromRPC
+	s.shutdownMu.Unlock()
 
 	// Wrap every request with trace logging.
 	tracedMux := s.withTrace(s.mux)
@@ -1728,14 +1733,22 @@ func (s *Server) dispatchRPC(
 	case "gateway.restart", "gateway.restart.request":
 		go func() {
 			time.Sleep(500 * time.Millisecond)
-			s.shutdownFn() // caller must restart the process externally
+			s.shutdownMu.Lock()
+			fn := s.shutdownFn
+			s.shutdownMu.Unlock()
+			fn()
 		}()
 		return map[string]any{"ok": true, "message": "gateway shutting down for restart"}, nil
 	case "gateway.restart.preflight":
 		return map[string]any{"ok": true, "canRestart": true, "pendingSessions": len(s.store.List())}, nil
 	case "gateway.stop":
-		// Trigger graceful shutdown — gateway.Run will return.
-		go func() { time.Sleep(200 * time.Millisecond); s.shutdownFn() }()
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			s.shutdownMu.Lock()
+			fn := s.shutdownFn
+			s.shutdownMu.Unlock()
+			fn()
+		}()
 		return map[string]any{"ok": true, "message": "gateway shutting down"}, nil
 
 	// ── wizard.* ────────────────────────────────────────────────────────

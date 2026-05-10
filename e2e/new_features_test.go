@@ -95,7 +95,9 @@ func TestE2E_StreamingVsBlocking(t *testing.T) {
 		`{"model":"echo","messages":[{"role":"user","content":"`+msg+`"}]}`)
 	assertStatus(t, blockResp, 200)
 	var blockResult struct {
-		Choices []struct{ Message struct{ Content string } `json:"message"` } `json:"choices"`
+		Choices []struct {
+			Message struct{ Content string } `json:"message"`
+		} `json:"choices"`
 	}
 	json.NewDecoder(blockResp.Body).Decode(&blockResult) //nolint:errcheck
 	blockResp.Body.Close()
