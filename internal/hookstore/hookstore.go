@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"openclaw-go/internal/fileutil"
 )
 
 // EventType is the gateway event a hook fires on.
@@ -187,5 +189,5 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, raw, 0o644)
+	return fileutil.WriteFile(s.path, raw, 0o644)
 }

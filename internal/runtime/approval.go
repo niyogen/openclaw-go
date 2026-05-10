@@ -85,7 +85,19 @@ func (q *ApprovalQueue) Decide(id string, approved bool) error {
 		entry.req.Status = ApprovalRejected
 	}
 	close(entry.done)
+	q.pruneLocked()
 	return nil
+}
+
+// pruneLocked removes decided entries older than 5 minutes to bound map growth.
+// Must be called with q.mu held.
+func (q *ApprovalQueue) pruneLocked() {
+	cutoff := time.Now().Add(-5 * time.Minute)
+	for id, e := range q.requests {
+		if e.req.Status != ApprovalPending && e.req.DecidedAt != nil && e.req.DecidedAt.Before(cutoff) {
+			delete(q.requests, id)
+		}
+	}
 }
 
 // List returns all pending requests.

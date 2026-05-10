@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"openclaw-go/internal/agents"
@@ -60,13 +61,13 @@ type Executor struct {
 
 // NewExecutor creates an executor backed by a runner and optional tool function.
 func NewExecutor(runner agents.Runner, toolFn ToolCallFn) *Executor {
-	seq := 0
+	var seq int64
 	return &Executor{
 		runner: runner,
 		toolFn: toolFn,
 		idGen: func() string {
-			seq++
-			return fmt.Sprintf("appr-%d-%d", time.Now().UnixNano(), seq)
+			n := atomic.AddInt64(&seq, 1)
+			return fmt.Sprintf("appr-%d-%d", time.Now().UnixNano(), n)
 		},
 	}
 }
@@ -147,7 +148,11 @@ func (e *Executor) Run(ctx context.Context, opts RunOptions) RunResult {
 			// Encode tool result back into history so the model can see it.
 			resultStr := ""
 			if rec.Error != "" {
-				resultStr = `{"error":"` + rec.Error + `"}`
+				if errJSON, jerr := json.Marshal(map[string]string{"error": rec.Error}); jerr == nil {
+					resultStr = string(errJSON)
+				} else {
+					resultStr = `{"error":"tool execution failed"}`
+				}
 			} else {
 				if raw, merr := encodeResult(rec.Result); merr == nil {
 					resultStr = raw

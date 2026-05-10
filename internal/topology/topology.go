@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"openclaw-go/internal/fileutil"
 )
 
 // NodeStatus describes the state of a remote gateway node.
@@ -198,6 +200,7 @@ func (s *Store) CreatePairing(deviceID string) *PairingRequest {
 		Status:    "pending",
 	}
 	s.pairing[req.ID] = req
+	_ = s.save()
 	return req
 }
 
@@ -222,20 +225,22 @@ func (s *Store) ApprovePairing(id string) error {
 		return errors.New("pairing request not found")
 	}
 	p.Status = "approved"
-	return nil
+	return s.save()
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────
 
 type persistedState struct {
-	Nodes   []*Node   `json:"nodes"`
-	Devices []*Device `json:"devices"`
+	Nodes   []*Node          `json:"nodes"`
+	Devices []*Device        `json:"devices"`
+	Pairing []*PairingRequest `json:"pairing,omitempty"`
 }
 
 func (s *Store) save() error {
 	state := persistedState{
 		Nodes:   make([]*Node, 0, len(s.nodes)),
 		Devices: make([]*Device, 0, len(s.devices)),
+		Pairing: make([]*PairingRequest, 0, len(s.pairing)),
 	}
 	for _, n := range s.nodes {
 		state.Nodes = append(state.Nodes, n)
@@ -243,11 +248,14 @@ func (s *Store) save() error {
 	for _, d := range s.devices {
 		state.Devices = append(state.Devices, d)
 	}
+	for _, p := range s.pairing {
+		state.Pairing = append(state.Pairing, p)
+	}
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, raw, 0o644)
+	return fileutil.WriteFile(s.path, raw, 0o644)
 }
 
 func (s *Store) load() error {
@@ -264,6 +272,9 @@ func (s *Store) load() error {
 	}
 	for _, d := range state.Devices {
 		s.devices[d.ID] = d
+	}
+	for _, p := range state.Pairing {
+		s.pairing[p.ID] = p
 	}
 	return nil
 }

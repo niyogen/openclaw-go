@@ -94,7 +94,7 @@ func (r *ToolRegistry) Invoke(ctx context.Context, req ToolInvokeRequest) (any, 
 
 // RegisterPluginTools registers any tools declared by external plugins.
 func (s *Server) RegisterPluginTools(toolName, description, endpoint string) {
-	client := &http.Client{}
+	client := &http.Client{Timeout: 30 * time.Second}
 	s.tools.Register(Tool{Name: toolName, Description: description},
 		func(ctx context.Context, args map[string]any) (any, error) {
 			return callPluginTool(ctx, client, endpoint, args)
@@ -118,6 +118,9 @@ func callPluginTool(ctx context.Context, client *http.Client, endpoint string, a
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("plugin tool endpoint returned HTTP %d", resp.StatusCode)
+	}
 	var result any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err

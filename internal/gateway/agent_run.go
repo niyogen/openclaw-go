@@ -81,12 +81,9 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = s.store.UpsertSession(req.SessionID, "cli", "")
-	_ = s.store.AppendMessage(req.SessionID, sessions.Message{
-		Role:      sessions.RoleUser,
-		Content:   req.Message,
-		CreatedAt: time.Now().UTC(),
-	})
 
+	// Snapshot history BEFORE appending the current user message so that
+	// buildMessages (which also appends turn.Message) doesn't duplicate it.
 	var history []agents.HistoryMessage
 	if sess, ok := s.store.Get(req.SessionID); ok {
 		for _, m := range sess.Messages {
@@ -96,6 +93,12 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+
+	_ = s.store.AppendMessage(req.SessionID, sessions.Message{
+		Role:      sessions.RoleUser,
+		Content:   req.Message,
+		CreatedAt: time.Now().UTC(),
+	})
 
 	toolFn := func(ctx context.Context, name string, args map[string]any) (any, error) {
 		return s.tools.Invoke(ctx, ToolInvokeRequest{Name: name, Arguments: args})

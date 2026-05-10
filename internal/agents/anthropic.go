@@ -77,19 +77,58 @@ func (r *AnthropicRunner) GenerateReply(ctx context.Context, turn Turn) (string,
 		return "", fmt.Errorf("anthropic api key is empty")
 	}
 
+	// Build Anthropic-compatible message list.
+	// Anthropic only accepts alternating user/assistant roles.
+	// - system messages are prepended to the next user turn's content
+	// - tool results are converted to user turns so the model sees them
+	var pendingSystem []string
 	messages := make([]anthropicMessage, 0, len(turn.History)+1)
 	for _, item := range turn.History {
 		role := strings.TrimSpace(item.Role)
-		// Anthropic only allows "user" and "assistant" roles, and messages must alternate.
-		if role != "user" && role != "assistant" {
+		content := strings.TrimSpace(item.Content)
+		if content == "" {
 			continue
 		}
-		if strings.TrimSpace(item.Content) == "" {
-			continue
+		switch role {
+		case "system":
+			pendingSystem = append(pendingSystem, content)
+		case "tool":
+			// Fold tool results into a user turn so the model sees them.
+			toolContent := "[tool result] " + content
+			if len(pendingSystem) > 0 {
+				toolContent = strings.Join(pendingSystem, "\n") + "\n" + toolContent
+				pendingSystem = pendingSystem[:0]
+			}
+			if len(messages) > 0 && messages[len(messages)-1].Role == "user" {
+				messages[len(messages)-1].Content += "\n" + toolContent
+			} else {
+				messages = append(messages, anthropicMessage{Role: "user", Content: toolContent})
+			}
+		case "user", "assistant":
+			userContent := content
+			if role == "user" && len(pendingSystem) > 0 {
+				userContent = strings.Join(pendingSystem, "\n") + "\n" + content
+				pendingSystem = pendingSystem[:0]
+			}
+			// Merge consecutive same-role messages to maintain alternation.
+			if len(messages) > 0 && messages[len(messages)-1].Role == role {
+				messages[len(messages)-1].Content += "\n" + userContent
+			} else {
+				messages = append(messages, anthropicMessage{Role: role, Content: userContent})
+			}
 		}
-		messages = append(messages, anthropicMessage{Role: role, Content: item.Content})
 	}
-	messages = append(messages, anthropicMessage{Role: "user", Content: turn.Message})
+
+	// Append the current user message, absorbing any remaining system context.
+	currentMsg := turn.Message
+	if len(pendingSystem) > 0 {
+		currentMsg = strings.Join(pendingSystem, "\n") + "\n" + currentMsg
+	}
+	if len(messages) > 0 && messages[len(messages)-1].Role == "user" {
+		messages[len(messages)-1].Content += "\n" + currentMsg
+	} else {
+		messages = append(messages, anthropicMessage{Role: "user", Content: currentMsg})
+	}
 
 	reqBody := anthropicRequest{
 		Model:     r.model,

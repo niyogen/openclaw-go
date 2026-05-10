@@ -2,11 +2,14 @@ package plugins
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Manifest describes an external plugin loaded from a directory.
@@ -106,6 +109,37 @@ func NewLoader(dir string) *Loader {
 	return &Loader{dir: dir}
 }
 
+// validateManifestURLs checks that all forward and endpoint URLs in a manifest
+// use an allowed scheme (http or https) to prevent SSRF via file:// or gopher://.
+func validateManifestURLs(m Manifest) error {
+	check := func(raw string) error {
+		if strings.TrimSpace(raw) == "" {
+			return nil
+		}
+		u, err := url.ParseRequestURI(raw)
+		if err != nil {
+			return fmt.Errorf("invalid URL %q: %w", raw, err)
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https":
+			return nil
+		default:
+			return errors.New("only http and https URLs are allowed in plugin manifests")
+		}
+	}
+	for _, r := range m.Routes {
+		if err := check(r.Forward); err != nil {
+			return err
+		}
+	}
+	for _, t := range m.Tools {
+		if err := check(t.Endpoint); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Load scans the plugin directory and returns one ExternalPlugin per manifest found.
 func (l *Loader) Load() ([]*ExternalPlugin, error) {
 	if l.dir == "" {
@@ -136,10 +170,13 @@ func (l *Loader) Load() ([]*ExternalPlugin, error) {
 		if strings.TrimSpace(m.Name) == "" {
 			m.Name = entry.Name()
 		}
+		if err := validateManifestURLs(m); err != nil {
+			continue // manifest has invalid/unsafe URLs — skip
+		}
 		loaded = append(loaded, &ExternalPlugin{
 			manifest: m,
 			dir:      filepath.Join(l.dir, entry.Name()),
-			client:   &http.Client{},
+			client:   &http.Client{Timeout: 30 * time.Second},
 		})
 	}
 	return loaded, nil

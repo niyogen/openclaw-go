@@ -218,7 +218,8 @@ func decodeSlackEvents(raw []byte) (string, []InboundMessage, error) {
 	}
 	switch env.Type {
 	case "url_verification":
-		return fmt.Sprintf(`{"challenge":"%s"}`, env.Challenge), nil, nil
+		resp, _ := json.Marshal(map[string]string{"challenge": env.Challenge})
+		return string(resp), nil, nil
 	case "event_callback":
 		if env.Event.Type != "message" || env.Event.BotID != "" || env.Event.Subtype != "" {
 			return `{"ok":true}`, nil, nil

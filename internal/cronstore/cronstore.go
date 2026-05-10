@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"openclaw-go/internal/fileutil"
 )
 
 // Job is a recurring task definition.
@@ -44,10 +46,11 @@ type RunFn func(ctx context.Context, job Job)
 
 // Store holds cron jobs and drives a simple ticker-based scheduler.
 type Store struct {
-	mu   sync.Mutex
-	jobs map[string]*Job
-	runs []Run // in-memory run history (capped at 500)
-	path string
+	mu      sync.Mutex
+	jobs    map[string]*Job
+	runs    []Run // in-memory run history (capped at 500)
+	path    string
+	running map[string]bool // tracks jobs currently executing (not persisted)
 }
 
 // New opens (or creates) a cron store backed by path.
@@ -55,7 +58,7 @@ func New(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	s := &Store{path: path, jobs: map[string]*Job{}, runs: []Run{}}
+	s := &Store{path: path, jobs: map[string]*Job{}, runs: []Run{}, running: map[string]bool{}}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -240,18 +243,24 @@ func (s *Store) schedulerLoop(ctx context.Context, runFn RunFn) {
 				if job.LastRunAt != nil && now.Sub(*job.LastRunAt) < interval {
 					continue
 				}
+				// Skip if a previous execution of this job is still running.
+				s.mu.Lock()
+				if s.running[job.ID] {
+					s.mu.Unlock()
+					continue
+				}
+				s.running[job.ID] = true
+				s.mu.Unlock()
+
 				go func(j Job) {
+					defer func() {
+						s.mu.Lock()
+						delete(s.running, j.ID)
+						s.mu.Unlock()
+					}()
 					if runFn != nil {
 						runFn(ctx, j)
 					}
-					now2 := time.Now().UTC()
-					s.mu.Lock()
-					if entry, ok := s.jobs[j.ID]; ok {
-						entry.LastRunAt = &now2
-						entry.LastRunError = ""
-					}
-					_ = s.saveLocked()
-					s.mu.Unlock()
 				}(job)
 			}
 		}
@@ -289,5 +298,5 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, raw, 0o644)
+	return fileutil.WriteFile(s.path, raw, 0o644)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -156,7 +157,10 @@ func (s *Server) RegisterPluginWS(pluginName, targetWSURL string) {
 		defer clientConn.Close()
 
 		// Connect to plugin backend.
-		pluginConn, _, err := websocket.DefaultDialer.DialContext(r.Context(), targetWSURL, nil)
+		pluginConn, dialResp, err := websocket.DefaultDialer.DialContext(r.Context(), targetWSURL, nil)
+		if dialResp != nil {
+			dialResp.Body.Close()
+		}
 		if err != nil {
 			_ = clientConn.WriteJSON(map[string]string{"error": "plugin ws unavailable: " + err.Error()})
 			return
@@ -232,30 +236,30 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.Handle("GET /tools", s.withAuth(s.handleToolsList))
-	s.mux.Handle("POST /tools/invoke", s.withAuth(s.handleToolsInvoke))
+	s.mux.Handle("POST /tools/invoke", s.withAuth(withBodyLimit(s.handleToolsInvoke)))
 	s.mux.Handle("GET /sessions", s.withAuth(s.handleListSessions))
 	s.mux.Handle("GET /sessions/{id}", s.withAuth(s.handleGetSession))
 	s.mux.Handle("DELETE /sessions/{id}", s.withAuth(s.handleDeleteSession))
 	s.mux.Handle("GET /sessions/{id}/history", s.withAuth(s.handleSessionHistory))
-	s.mux.Handle("POST /sessions/{id}/patch", s.withAuth(s.handleSessionPatch))
+	s.mux.Handle("POST /sessions/{id}/patch", s.withAuth(withBodyLimit(s.handleSessionPatch)))
 	s.mux.Handle("POST /sessions/{id}/kill", s.withAuth(s.handleSessionKill))
 	s.mux.Handle("POST /sessions/{id}/compact", s.withAuth(s.handleSessionCompact))
 	s.mux.Handle("GET /sessions/{id}/stats", s.withAuth(s.handleSessionStats))
-	s.mux.HandleFunc("/message", s.withAuth(s.withRateLimit(s.handleMessage)))
-	s.mux.Handle("POST /agent/run", s.withAuth(s.withRateLimit(s.handleAgentRun)))
+	s.mux.HandleFunc("/message", s.withAuth(s.withRateLimit(withBodyLimit(s.handleMessage))))
+	s.mux.Handle("POST /agent/run", s.withAuth(s.withRateLimit(withBodyLimit(s.handleAgentRun))))
 	s.mux.Handle("GET /approvals", s.withAuth(s.handleApprovalsList))
-	s.mux.Handle("POST /approvals/{id}/decide", s.withAuth(s.handleApprovalDecide))
+	s.mux.Handle("POST /approvals/{id}/decide", s.withAuth(withBodyLimit(s.handleApprovalDecide)))
 	s.mux.Handle("GET /logs", s.withAuth(s.handleLogsList))
 	s.mux.Handle("GET /cron", s.withAuth(s.handleCronList))
-	s.mux.Handle("POST /cron", s.withAuth(s.handleCronAdd))
+	s.mux.Handle("POST /cron", s.withAuth(withBodyLimit(s.handleCronAdd)))
 	s.mux.Handle("DELETE /cron/{id}", s.withAuth(s.handleCronDelete))
 	s.mux.Handle("GET /hooks", s.withAuth(s.handleHooksList))
-	s.mux.Handle("POST /hooks", s.withAuth(s.handleHooksAdd))
+	s.mux.Handle("POST /hooks", s.withAuth(withBodyLimit(s.handleHooksAdd)))
 	s.mux.Handle("DELETE /hooks/{id}", s.withAuth(s.handleHooksDelete))
 	s.mux.Handle("GET /secrets", s.withAuth(s.handleSecretsList))
-	s.mux.Handle("POST /secrets", s.withAuth(s.handleSecretsSet))
+	s.mux.Handle("POST /secrets", s.withAuth(withBodyLimit(s.handleSecretsSet)))
 	s.mux.Handle("DELETE /secrets/{name}", s.withAuth(s.handleSecretsDelete))
-	s.mux.HandleFunc("/rpc", s.withAuth(s.handleRPC))
+	s.mux.HandleFunc("/rpc", s.withAuth(withBodyLimit(s.handleRPC)))
 	s.mux.HandleFunc("/ws", s.withAuth(s.handleWS))
 }
 
@@ -270,9 +274,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// sessionSummary is a projection of Session omitting the full message history,
+// used in list responses to avoid transmitting unbounded message payloads.
+type sessionSummary struct {
+	ID           string    `json:"id"`
+	Channel      string    `json:"channel"`
+	Target       string    `json:"target"`
+	MessageCount int       `json:"messageCount"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	all := s.store.List()
+	summaries := make([]sessionSummary, 0, len(all))
+	for _, sess := range all {
+		summaries = append(summaries, sessionSummary{
+			ID:           sess.ID,
+			Channel:      sess.Channel,
+			Target:       sess.Target,
+			MessageCount: len(sess.Messages),
+			UpdatedAt:    sess.UpdatedAt,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sessions": s.store.List(),
+		"sessions": summaries,
 	})
 }
 
@@ -457,13 +482,11 @@ func (s *Server) isAuthorized(r *http.Request) bool {
 		}
 	}
 
-	// Trusted proxy: allow requests from configured proxy IPs without auth.
+	// Trusted proxy: allow requests from configured proxy IPs/CIDRs without auth.
 	if len(s.trustedProxies) > 0 {
 		remoteIP := clientIP(r)
-		for _, proxy := range s.trustedProxies {
-			if strings.TrimSpace(proxy) == remoteIP {
-				return true
-			}
+		if isTrustedProxy(remoteIP, s.trustedProxies) {
+			return true
 		}
 	}
 
@@ -2126,6 +2149,29 @@ func normalizeOrigins(input []string) map[string]struct{} {
 	return out
 }
 
+// isTrustedProxy returns true if remoteIP matches any configured proxy entry,
+// which may be a literal IP address or a CIDR range (e.g. "10.0.0.0/8").
+func isTrustedProxy(remoteIP string, proxies []string) bool {
+	ip := net.ParseIP(strings.TrimSpace(remoteIP))
+	for _, proxy := range proxies {
+		proxy = strings.TrimSpace(proxy)
+		if proxy == "" {
+			continue
+		}
+		if strings.Contains(proxy, "/") {
+			_, network, err := net.ParseCIDR(proxy)
+			if err == nil && ip != nil && network.Contains(ip) {
+				return true
+			}
+		} else {
+			if proxy == remoteIP {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s *Server) isAllowedOrigin(origin string) bool {
 	if len(s.allowedOrigins) == 0 {
 		return true
@@ -2142,4 +2188,16 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// maxBodyBytes is the maximum size accepted for JSON request bodies (4 MiB).
+const maxBodyBytes = 4 << 20
+
+// withBodyLimit wraps a handler to cap request body size at maxBodyBytes.
+// json.Decoder returns an error when the limit is hit so handlers reply 400.
+func withBodyLimit(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		next(w, r)
+	}
 }

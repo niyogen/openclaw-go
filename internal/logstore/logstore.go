@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"openclaw-go/internal/fileutil"
 )
 
 // Level is the log entry severity.
@@ -120,5 +122,5 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, raw, 0o644)
+	return fileutil.WriteFile(s.path, raw, 0o644)
 }

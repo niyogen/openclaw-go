@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"openclaw-go/internal/fileutil"
 )
 
 // Secret is a named secret entry. Value is never exposed in list responses.
@@ -37,7 +39,7 @@ type secretEntry struct {
 
 // New opens (or creates) a secret store backed by path.
 func New(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
 	s := &Store{path: path, secrets: map[string]*secretEntry{}}
@@ -150,5 +152,5 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, raw, 0o644)
+	return fileutil.WriteFile(s.path, raw, 0o600)
 }

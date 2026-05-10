@@ -15,9 +15,9 @@ import (
 // registerOpenAICompatRoutes adds OpenAI-compatible endpoints under /v1/.
 func (s *Server) registerOpenAICompatRoutes() {
 	s.mux.Handle("GET /v1/models", s.withAuth(s.handleV1Models))
-	s.mux.Handle("POST /v1/chat/completions", s.withAuth(s.withRateLimit(s.handleV1ChatCompletions)))
-	s.mux.Handle("POST /v1/responses", s.withAuth(s.withRateLimit(s.handleV1Responses)))
-	s.mux.Handle("POST /v1/embeddings", s.withAuth(s.handleV1Embeddings))
+	s.mux.Handle("POST /v1/chat/completions", s.withAuth(s.withRateLimit(withBodyLimit(s.handleV1ChatCompletions))))
+	s.mux.Handle("POST /v1/responses", s.withAuth(s.withRateLimit(withBodyLimit(s.handleV1Responses))))
+	s.mux.Handle("POST /v1/embeddings", s.withAuth(withBodyLimit(s.handleV1Embeddings)))
 	s.mux.HandleFunc("/v1/health", s.handleHealth)
 	s.mux.HandleFunc("/v1/healthz", s.handleHealth)
 	s.mux.HandleFunc("/healthz", s.handleHealth)
