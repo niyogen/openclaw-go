@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"openclaw-go/internal/agents"
@@ -65,6 +67,69 @@ func TestSessionsRouteRequiresAuthWhenEnabled(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected status 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestTrustedProxyCIDR(t *testing.T) {
+	s := buildTestServer(t, "secret")
+	s.SetAuth("", []string{"10.0.0.0/8"})
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	// A request claiming to come from 10.1.2.3 (inside the /8) should be allowed.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/sessions", nil)
+	req.Header.Set("X-Forwarded-For", "10.1.2.3")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for trusted CIDR, got %d", resp.StatusCode)
+	}
+
+	// A request from outside the CIDR should be denied.
+	req2, _ := http.NewRequest(http.MethodGet, ts.URL+"/sessions", nil)
+	req2.Header.Set("X-Forwarded-For", "192.168.1.1")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for untrusted IP, got %d", resp2.StatusCode)
+	}
+}
+
+func TestTrustedProxyLiteralIP(t *testing.T) {
+	s := buildTestServer(t, "secret")
+	s.SetAuth("", []string{"192.168.5.5"})
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/sessions", nil)
+	req.Header.Set("X-Forwarded-For", "192.168.5.5")
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for literal trusted IP, got %d", resp.StatusCode)
+	}
+}
+
+func TestBodyLimitRejectsOversizedPayload(t *testing.T) {
+	s := buildTestServer(t, "")
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	// Build a payload larger than maxBodyBytes (4 MiB).
+	huge := `{"sessionId":"x","message":"` + strings.Repeat("a", maxBodyBytes+1) + `"}`
+	resp, err := http.Post(ts.URL+"/message", "application/json", bytes.NewBufferString(huge))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("expected non-200 for oversized body, got %d", resp.StatusCode)
 	}
 }
 

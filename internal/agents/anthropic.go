@@ -72,15 +72,13 @@ type anthropicResponse struct {
 	} `json:"error"`
 }
 
-func (r *AnthropicRunner) GenerateReply(ctx context.Context, turn Turn) (string, error) {
-	if r.apiKey == "" {
-		return "", fmt.Errorf("anthropic api key is empty")
-	}
-
-	// Build Anthropic-compatible message list.
-	// Anthropic only accepts alternating user/assistant roles.
-	// - system messages are prepended to the next user turn's content
-	// - tool results are converted to user turns so the model sees them
+// buildAnthropicMessages converts a Turn into an Anthropic-compatible message
+// list.  Anthropic requires strictly alternating user/assistant roles; this
+// function enforces that by:
+//   - prepending system messages into the next user turn's content
+//   - converting tool results into user turns
+//   - merging consecutive same-role messages
+func buildAnthropicMessages(turn Turn) []anthropicMessage {
 	var pendingSystem []string
 	messages := make([]anthropicMessage, 0, len(turn.History)+1)
 	for _, item := range turn.History {
@@ -93,7 +91,6 @@ func (r *AnthropicRunner) GenerateReply(ctx context.Context, turn Turn) (string,
 		case "system":
 			pendingSystem = append(pendingSystem, content)
 		case "tool":
-			// Fold tool results into a user turn so the model sees them.
 			toolContent := "[tool result] " + content
 			if len(pendingSystem) > 0 {
 				toolContent = strings.Join(pendingSystem, "\n") + "\n" + toolContent
@@ -110,7 +107,6 @@ func (r *AnthropicRunner) GenerateReply(ctx context.Context, turn Turn) (string,
 				userContent = strings.Join(pendingSystem, "\n") + "\n" + content
 				pendingSystem = pendingSystem[:0]
 			}
-			// Merge consecutive same-role messages to maintain alternation.
 			if len(messages) > 0 && messages[len(messages)-1].Role == role {
 				messages[len(messages)-1].Content += "\n" + userContent
 			} else {
@@ -118,8 +114,6 @@ func (r *AnthropicRunner) GenerateReply(ctx context.Context, turn Turn) (string,
 			}
 		}
 	}
-
-	// Append the current user message, absorbing any remaining system context.
 	currentMsg := turn.Message
 	if len(pendingSystem) > 0 {
 		currentMsg = strings.Join(pendingSystem, "\n") + "\n" + currentMsg
@@ -129,6 +123,15 @@ func (r *AnthropicRunner) GenerateReply(ctx context.Context, turn Turn) (string,
 	} else {
 		messages = append(messages, anthropicMessage{Role: "user", Content: currentMsg})
 	}
+	return messages
+}
+
+func (r *AnthropicRunner) GenerateReply(ctx context.Context, turn Turn) (string, error) {
+	if r.apiKey == "" {
+		return "", fmt.Errorf("anthropic api key is empty")
+	}
+
+	messages := buildAnthropicMessages(turn)
 
 	reqBody := anthropicRequest{
 		Model:     r.model,

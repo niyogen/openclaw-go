@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,6 +27,30 @@ import (
 	"openclaw-go/internal/plugins"
 	"openclaw-go/internal/sessions"
 )
+
+// testTempDir creates a temporary directory and registers a cleanup that retries
+// os.RemoveAll up to 5 times with a short backoff. This handles the Windows
+// file-system behaviour where the OS (antivirus/indexer) briefly holds handles
+// on recently-written files after Go-level Close() returns, which would
+// otherwise cause os.RemoveAll to report "directory not empty".
+func testTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "openclaw-e2e-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() {
+		var lastErr error
+		for i := 0; i < 5; i++ {
+			if lastErr = os.RemoveAll(dir); lastErr == nil {
+				return
+			}
+			time.Sleep(time.Duration(i+1) * 50 * time.Millisecond)
+		}
+		t.Logf("warning: could not remove temp dir %s: %v", dir, lastErr)
+	})
+	return dir
+}
 
 // channelHarness creates a harness with all six channel webhook routes mounted.
 func newChannelHarness(t *testing.T) *harness {
@@ -64,7 +89,7 @@ type harness struct {
 
 func newHarness(t *testing.T, authToken string) *harness {
 	t.Helper()
-	dir := t.TempDir()
+	dir := testTempDir(t)
 
 	store, err := sessions.New(filepath.Join(dir, "sessions.json"))
 	if err != nil {
@@ -124,10 +149,9 @@ func newHarness(t *testing.T, authToken string) *harness {
 		done:   done,
 	}
 
-	// Registered after t.TempDir(), so runs before the TempDir RemoveAll in
-	// LIFO cleanup order. This guarantees the server goroutine (and any
-	// in-flight sessions.json writes) have fully exited before the temp
-	// directory is removed, preventing the "directory not empty" race.
+	// Registered after testTempDir's cleanup so it runs first in LIFO order.
+	// This guarantees the server goroutine has fully exited (all file writes
+	// complete) before the retry-cleanup attempts to remove the temp dir.
 	t.Cleanup(h.close)
 
 	return h

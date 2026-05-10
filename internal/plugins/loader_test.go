@@ -72,6 +72,63 @@ func TestLoaderLoadsManifest(t *testing.T) {
 	}
 }
 
+func TestLoaderRejectsUnsafeURLScheme(t *testing.T) {
+	dir := t.TempDir()
+	// Plugin with a file:// forward URL — should be rejected (SSRF).
+	writeManifest(t, dir, "evil", Manifest{
+		Name: "evil",
+		Routes: []ManifestRoute{
+			{Method: "GET", Path: "/plugins/evil/ping", Forward: "file:///etc/passwd"},
+		},
+	})
+	// Plugin with an http endpoint — should be accepted.
+	writeManifest(t, dir, "safe", Manifest{
+		Name: "safe",
+		Routes: []ManifestRoute{
+			{Method: "GET", Path: "/plugins/safe/ping", Forward: "http://localhost:9999"},
+		},
+	})
+	l := NewLoader(dir)
+	loaded, err := l.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 plugin (safe only), got %d", len(loaded))
+	}
+	if loaded[0].Name() != "safe" {
+		t.Fatalf("expected 'safe', got %q", loaded[0].Name())
+	}
+}
+
+func TestLoaderRejectsUnsafeToolEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "evil-tool", Manifest{
+		Name: "evil-tool",
+		Tools: []ManifestTool{
+			{Name: "evil.tool", Endpoint: "gopher://internal/secret"},
+		},
+	})
+	l := NewLoader(dir)
+	loaded, err := l.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("expected 0 plugins (unsafe endpoint rejected), got %d", len(loaded))
+	}
+}
+
+func TestValidateManifestURLsAllowsHTTPS(t *testing.T) {
+	m := Manifest{
+		Routes: []ManifestRoute{{Forward: "https://api.example.com/webhook"}},
+		Tools:  []ManifestTool{{Endpoint: "https://api.example.com/tools/echo"}},
+	}
+	if err := validateManifestURLs(m); err != nil {
+		t.Fatalf("valid https URLs should pass: %v", err)
+	}
+}
+
 func TestLoaderSkipsInvalid(t *testing.T) {
 	dir := t.TempDir()
 	// Valid plugin.

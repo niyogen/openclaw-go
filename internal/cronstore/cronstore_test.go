@@ -1,8 +1,11 @@
 package cronstore
 
 import (
+	"context"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestCronStoreAddRemoveList(t *testing.T) {
@@ -27,6 +30,38 @@ func TestCronStoreAddRemoveList(t *testing.T) {
 	}
 	if len(s.List()) != 0 {
 		t.Fatal("expected 0 jobs after remove")
+	}
+}
+
+// TestNoOverlappingRuns verifies that the scheduler does not start a second
+// instance of a job while one is already running.
+func TestNoOverlappingRuns(t *testing.T) {
+	s, err := New(t.TempDir() + "/cron.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Add(Job{ID: "overlap", Schedule: "@every 1s", Enabled: true, Command: "echo hi"})
+
+	var concurrent int64 // max concurrent executions seen
+	var running int64    // currently running count
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	s.StartScheduler(ctx, func(_ context.Context, j Job) {
+		cur := atomic.AddInt64(&running, 1)
+		if prev := atomic.LoadInt64(&concurrent); cur > prev {
+			atomic.StoreInt64(&concurrent, cur)
+		}
+		time.Sleep(150 * time.Millisecond) // simulate long job
+		atomic.AddInt64(&running, -1)
+	})
+
+	<-ctx.Done()
+	time.Sleep(50 * time.Millisecond) // let any running goroutines finish
+
+	if atomic.LoadInt64(&concurrent) > 1 {
+		t.Fatalf("job ran concurrently: max concurrent=%d", atomic.LoadInt64(&concurrent))
 	}
 }
 
