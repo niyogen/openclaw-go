@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -159,6 +160,139 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 		Turns:     len(result.Turns),
 		Error:     errStr,
 	})
+}
+
+// handleAgentRunStream is POST /agent/run/stream.
+// It accepts the same body as /agent/run and streams RunEvents as SSE.
+func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming not supported"})
+		return
+	}
+
+	var req agentRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if strings.TrimSpace(req.SessionID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sessionId is required"})
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+		return
+	}
+
+	policy := runtime.DefaultPolicy()
+	if req.Policy != nil {
+		policy = *req.Policy
+	}
+
+	_ = s.store.UpsertSession(req.SessionID, "cli", "")
+
+	var history []agents.HistoryMessage
+	if sess, ok2 := s.store.Get(req.SessionID); ok2 {
+		for _, m := range sess.Messages {
+			history = append(history, agents.HistoryMessage{
+				Role:    string(m.Role),
+				Content: m.Content,
+			})
+		}
+	}
+
+	_ = s.store.AppendMessage(req.SessionID, sessions.Message{
+		Role:      sessions.RoleUser,
+		Content:   req.Message,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	toolFn := func(ctx context.Context, name string, args map[string]any) (any, error) {
+		return s.tools.Invoke(ctx, ToolInvokeRequest{Name: name, Arguments: args})
+	}
+	exec := runtime.NewExecutor(s.runner, toolFn)
+	exec.SetSubagentFn(func(ctx context.Context, message, instructions string) (string, error) {
+		var subHistory []agents.HistoryMessage
+		if strings.TrimSpace(instructions) != "" {
+			subHistory = []agents.HistoryMessage{{Role: "system", Content: instructions}}
+		}
+		reply, err := s.runner.GenerateReply(ctx, agents.Turn{Message: message, History: subHistory})
+		if err != nil {
+			return "", err
+		}
+		return reply, nil
+	})
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	writeSSE := func(ev runtime.RunEvent) {
+		raw, _ := json.Marshal(ev)
+		fmt.Fprintf(w, "data: %s\n\n", raw)
+		flusher.Flush()
+	}
+
+	events := make(chan runtime.RunEvent, 32)
+	go func() {
+		exec.RunStream(r.Context(), runtime.RunOptions{
+			SessionID:    req.SessionID,
+			Message:      req.Message,
+			History:      history,
+			Instructions: req.Instructions,
+			Policy:       policy,
+			Approvals:    s.approvals,
+		}, events)
+	}()
+
+	var finalReply string
+	var turnCount int
+	var runID string
+	var errStr string
+
+	for ev := range events {
+		writeSSE(ev)
+		switch ev.Type {
+		case runtime.RunEventDone:
+			finalReply = ev.Reply
+			turnCount = ev.Turns
+			runID = ev.RunID
+		case runtime.RunEventError:
+			errStr = ev.Error
+		}
+	}
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+
+	// Persist assistant reply and store run result (mirrors handleAgentRun behaviour).
+	if errStr == "" && finalReply != "" {
+		_ = s.store.AppendMessage(req.SessionID, sessions.Message{
+			Role:      sessions.RoleAssistant,
+			Content:   finalReply,
+			CreatedAt: time.Now().UTC(),
+		})
+	}
+
+	if runID != "" {
+		result := runtime.RunResult{FinalText: finalReply}
+		if errStr != "" {
+			result.FinalText = ""
+		}
+		globalRunStore.put(runID, result)
+	}
+
+	s.hooks.Emit(hookstore.EventAgentRunComplete, map[string]any{
+		"runId": runID, "sessionId": req.SessionID, "turns": turnCount, "error": errStr,
+	})
+	s.logs.Append(logstore.LevelInfo, "agent", "stream run complete: "+runID, map[string]any{"turns": turnCount})
 }
 
 func (s *Server) handleApprovalsList(w http.ResponseWriter, _ *http.Request) {

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"openclaw-go/internal/agents"
 	"openclaw-go/internal/channels"
@@ -14,9 +16,27 @@ import (
 	"openclaw-go/internal/sessions"
 )
 
+// testDataDir creates a temp dir with retry-cleanup for Windows file-handle release.
+func testDataDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "gateway-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < 5; i++ {
+			if os.RemoveAll(dir) == nil {
+				return
+			}
+			time.Sleep(time.Duration(i+1) * 50 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
 func buildTestServer(t *testing.T, authToken string) *Server {
 	t.Helper()
-	dir := t.TempDir()
+	dir := testDataDir(t)
 	store, err := sessions.New(filepath.Join(dir, "sessions.json"))
 	if err != nil {
 		t.Fatalf("sessions.New failed: %v", err)

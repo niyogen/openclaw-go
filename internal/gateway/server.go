@@ -291,6 +291,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("GET /agent/run/{runId}", cors(s.withAuth(s.handleAgentRunGet)))
 	s.mux.HandleFunc("/message", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleMessage)))))
 	s.mux.Handle("POST /agent/run", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleAgentRun)))))
+	s.mux.Handle("POST /agent/run/stream", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleAgentRunStream)))))
 	s.mux.Handle("GET /approvals", cors(s.withAuth(s.handleApprovalsList)))
 	s.mux.Handle("POST /approvals/{id}/decide", cors(s.withAuth(withBodyLimit(s.handleApprovalDecide))))
 	s.mux.Handle("GET /logs", cors(s.withAuth(s.handleLogsList)))

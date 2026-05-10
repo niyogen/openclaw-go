@@ -6,7 +6,27 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
+
+// retryTempDir creates a temp dir and registers cleanup with retries for
+// Windows, where the OS may briefly hold handles on recently-written files.
+func retryTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "fileutil-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < 5; i++ {
+			if os.RemoveAll(dir) == nil {
+				return
+			}
+			time.Sleep(time.Duration(i+1) * 50 * time.Millisecond)
+		}
+	})
+	return dir
+}
 
 func TestWriteFileBasic(t *testing.T) {
 	dir := t.TempDir()
@@ -44,7 +64,7 @@ func TestWriteFileOverwrite(t *testing.T) {
 // TestWriteFileConcurrent verifies that concurrent writes do not corrupt the
 // file — readers should always see complete, valid JSON.
 func TestWriteFileConcurrent(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "concurrent.json")
 
 	var wg sync.WaitGroup
