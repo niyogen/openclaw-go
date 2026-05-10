@@ -136,12 +136,27 @@ func (e *Executor) Run(ctx context.Context, opts RunOptions) RunResult {
 		history = append(history, agents.HistoryMessage{Role: "assistant", Content: reply})
 
 		for _, tc := range toolCalls {
+			parsedArgs := tc.Function.ParsedArgs()
+			// If argument parsing failed, record the error without invoking the tool.
+			if errMsg, bad := parsedArgs["_parseError"]; bad {
+				if opts.OnToolCall != nil {
+					opts.OnToolCall(tc.Function.Name, parsedArgs)
+				}
+				tr.ToolCalls = append(tr.ToolCalls, ToolCallRecord{
+					Tool:  tc.Function.Name,
+					Error: fmt.Sprintf("argument parse error: %v", errMsg),
+				})
+				if errJSON, jerr := json.Marshal(map[string]string{"error": fmt.Sprintf("argument parse error: %v", errMsg)}); jerr == nil {
+					history = append(history, agents.HistoryMessage{Role: "tool", Content: string(errJSON)})
+				}
+				continue
+			}
 			if opts.OnToolCall != nil {
-				opts.OnToolCall(tc.Function.Name, tc.Function.ParsedArgs())
+				opts.OnToolCall(tc.Function.Name, parsedArgs)
 			}
 			rec := e.InvokeToolWithPolicy(
 				ctx, policy, opts.Approvals, opts.SessionID,
-				tc.Function.Name, tc.Function.ParsedArgs(),
+				tc.Function.Name, parsedArgs,
 			)
 			tr.ToolCalls = append(tr.ToolCalls, rec)
 

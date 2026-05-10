@@ -40,9 +40,15 @@ func (s *Server) registerUIRoutes() {
 	s.mux.Handle("/ui/", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		// Try the exact path first; fall back to index.html for SPA routing.
 		if UIDir != "" {
-			path := filepath.Join(UIDir, strings.TrimPrefix(r.URL.Path, "/ui"))
-			if _, err := os.Stat(path); os.IsNotExist(err) && !strings.Contains(r.URL.Path, ".") {
-				http.ServeFile(w, r, filepath.Join(UIDir, "index.html"))
+			root := filepath.Clean(UIDir)
+			reqPath := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(r.URL.Path, "/ui")))
+			// Guard against path traversal: resolved path must stay inside UIDir.
+			if !strings.HasPrefix(reqPath, root+string(filepath.Separator)) && reqPath != root {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			if _, err := os.Stat(reqPath); os.IsNotExist(err) && !strings.Contains(r.URL.Path, ".") {
+				http.ServeFile(w, r, filepath.Join(root, "index.html"))
 				return
 			}
 		}

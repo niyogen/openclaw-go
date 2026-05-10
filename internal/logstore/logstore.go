@@ -56,8 +56,9 @@ func New(path string) (*Store, error) {
 	return s, nil
 }
 
-// Append adds a log entry.
-func (s *Store) Append(level Level, component, message string, meta map[string]any) {
+// Append adds a log entry. It returns an error if the entry cannot be
+// persisted to disk; the in-memory log always reflects the append.
+func (s *Store) Append(level Level, component, message string, meta map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seq++
@@ -73,7 +74,7 @@ func (s *Store) Append(level Level, component, message string, meta map[string]a
 	if len(s.entries) > s.maxEntries {
 		s.entries = s.entries[len(s.entries)-s.maxEntries:]
 	}
-	_ = s.saveLocked()
+	return s.saveLocked()
 }
 
 // List returns entries (newest last), optionally filtered by level/component.

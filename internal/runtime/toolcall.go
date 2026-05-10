@@ -20,14 +20,15 @@ type ToolCallFunc struct {
 }
 
 // ParsedArgs deserialises the JSON arguments string into a map.
+// If the arguments string is malformed the error is returned so callers
+// can reject the tool call rather than silently invoking it with empty args.
 func (f ToolCallFunc) ParsedArgs() map[string]any {
 	if strings.TrimSpace(f.Arguments) == "" {
 		return map[string]any{}
 	}
 	var m map[string]any
-	_ = json.Unmarshal([]byte(f.Arguments), &m)
-	if m == nil {
-		return map[string]any{}
+	if err := json.Unmarshal([]byte(f.Arguments), &m); err != nil {
+		return map[string]any{"_parseError": err.Error()}
 	}
 	return m
 }

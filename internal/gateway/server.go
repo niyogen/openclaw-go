@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"openclaw-go/internal/agents"
@@ -358,7 +359,7 @@ func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		KeepN int `json:"keepN"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.KeepN < 0 {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.KeepN <= 0 {
 		req.KeepN = 20 // default: keep last 20 messages
 	}
 	removed, err := s.store.Compact(id, req.KeepN)
@@ -1285,7 +1286,11 @@ func (s *Server) dispatchRPC(
 		if len(params) > 0 {
 			_ = json.Unmarshal(params, &p)
 		}
-		return nil, &rpcError{Code: -32001, Message: "skill not found: " + p.Name}
+		return map[string]any{
+			"name":   p.Name,
+			"status": "not_implemented",
+			"note":   "skill registry not configured",
+		}, nil
 	case "skills.bins":
 		return map[string]any{"bins": []any{}}, nil
 	case "skills.install":
@@ -2146,6 +2151,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	send := make(chan wsFrame, 16)
 	done := make(chan struct{})
 
+	var subCount int32 // per-connection subscription goroutine counter
+
 	// Reader goroutine — handles framed client messages.
 	go func() {
 		defer close(done)
@@ -2154,7 +2161,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := conn.ReadJSON(&frame); err != nil {
 				return
 			}
-			s.dispatchWSFrame(r.Context(), frame, send, done)
+			s.dispatchWSFrame(r.Context(), frame, send, done, &subCount)
 		}
 	}()
 
@@ -2171,8 +2178,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// maxWSSubscriptions is the maximum concurrent event subscriptions per WS connection.
+const maxWSSubscriptions = 10
+
 // dispatchWSFrame routes an inbound WS frame to the appropriate handler.
-func (s *Server) dispatchWSFrame(ctx context.Context, frame wsFrame, send chan<- wsFrame, done <-chan struct{}) {
+func (s *Server) dispatchWSFrame(ctx context.Context, frame wsFrame, send chan<- wsFrame, done <-chan struct{}, subCount *int32) {
 	replyErr := func(id, msg string) {
 		send <- wsFrame{Type: "error", ID: id, Error: msg}
 	}
@@ -2226,12 +2236,21 @@ func (s *Server) dispatchWSFrame(ctx context.Context, frame wsFrame, send chan<-
 
 	case "sessions.subscribe":
 		// Subscribe to events for a specific session (or all if sessionId is empty).
+		// Limit concurrent subscriptions per connection to prevent goroutine exhaustion.
+		if atomic.AddInt32(subCount, 1) > maxWSSubscriptions {
+			atomic.AddInt32(subCount, -1)
+			replyErr(frame.ID, "too many subscriptions on this connection")
+			return
+		}
 		sessionFilter := strings.TrimSpace(frame.SessionID)
 		evCh, unsub := s.bus.Subscribe(sessionFilter)
 		// Forward events to the WS send channel until the connection closes
 		// (done is closed) or the subscription is cancelled.
 		go func() {
-			defer unsub()
+			defer func() {
+				unsub()
+				atomic.AddInt32(subCount, -1)
+			}()
 			for {
 				select {
 				case <-done:

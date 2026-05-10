@@ -131,8 +131,7 @@ func (s *Store) List() []Session {
 	defer s.mu.Unlock()
 	out := make([]Session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
-		copySess := *sess
-		out = append(out, copySess)
+		out = append(out, deepCopySession(sess))
 	}
 	return out
 }
@@ -144,8 +143,18 @@ func (s *Store) Get(sessionID string) (Session, bool) {
 	if !ok {
 		return Session{}, false
 	}
-	copySess := *item
-	return copySess, true
+	return deepCopySession(item), true
+}
+
+// deepCopySession returns a full copy of sess with its Messages slice
+// independently allocated so callers cannot race against store mutations.
+func deepCopySession(sess *Session) Session {
+	cp := *sess
+	if len(sess.Messages) > 0 {
+		cp.Messages = make([]Message, len(sess.Messages))
+		copy(cp.Messages, sess.Messages)
+	}
+	return cp
 }
 
 // Kill removes all messages from a session but keeps the session record.
