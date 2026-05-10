@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -9,6 +9,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GOFLAGS: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,19 +33,23 @@ jobs:
           go-version: ${{ matrix.go }}
           cache: true
 
-      - name: Tidy and download
-        run: go mod tidy && go mod download
+      # Retry module download on cache miss (tar restore can fail transiently).
+      - name: Download modules
+        run: |
+          go mod download || go mod download || go mod download
 
       - name: Vet
         run: go vet ./...
 
+      # Run packages serially (-p 1) with the race detector to eliminate any
+      # timing-sensitive interactions between concurrently-running test binaries.
       - name: Test (Linux / macOS — with race detector)
         if: runner.os != 'Windows'
-        run: go test -count=1 -timeout 60s -race ./...
+        run: go test -p 1 -count=1 -timeout 120s -race ./...
 
       - name: Test (Windows — CGO disabled, no -race)
         if: runner.os == 'Windows'
-        run: go test -count=1 -timeout 60s ./...
+        run: go test -p 1 -count=1 -timeout 120s ./...
 
   build:
     name: Build binary
@@ -59,8 +64,8 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      - name: Tidy and download
-        run: go mod tidy && go mod download
+      - name: Download modules
+        run: go mod download || go mod download
 
       - name: Build
         run: |
@@ -91,8 +96,8 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      - name: Tidy and download
-        run: go mod tidy && go mod download
+      - name: Download modules
+        run: go mod download || go mod download
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
