@@ -137,6 +137,16 @@ func New(
 	}
 	s.shutdownTimeout = 5 * time.Second
 	s.runnerCache = map[string]agents.Runner{}
+	// Final nil-guard: if every storage path attempt has failed, use a
+	// guaranteed temp path so handlers never nil-panic on s.topo/s.workspace.
+	if s.topo == nil {
+		tmp := os.TempDir()
+		s.topo, _ = topology.New(filepath.Join(tmp, fmt.Sprintf("openclaw-topo-%d.json", os.Getpid())))
+	}
+	if s.workspace == nil {
+		tmp := os.TempDir()
+		s.workspace, _ = agents.NewWorkspace(filepath.Join(tmp, fmt.Sprintf("openclaw-ws-%d.json", os.Getpid())))
+	}
 	s.initTools()
 	s.registerRoutes()
 	s.registerOpenAICompatRoutes()
@@ -1081,10 +1091,11 @@ func (s *Server) dispatchRPC(
 		// Over JSON-RPC / REST, return recent events from the bus (poll-style).
 		// For real push, use the WS frame type "sessions.subscribe" instead.
 		var p sessionIDParams
-		if len(params) > 0 {
-			if err := json.Unmarshal(params, &p); err != nil {
-				return nil, &rpcError{Code: -32602, Message: "invalid params"}
-			}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
 		}
 		evCh, unsub := s.bus.Subscribe(p.SessionID)
 		defer unsub()
@@ -1823,8 +1834,11 @@ func (s *Server) dispatchRPC(
 			DeviceID string `json:"deviceId"`
 			Name     string `json:"name"`
 		}
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
 		d := topology.Device{ID: p.DeviceID, Name: p.Name}
 		if err := s.topo.AddDevice(d); err != nil {
@@ -1933,7 +1947,12 @@ func (s *Server) dispatchRPC(
 			AgentID string `json:"agentId"`
 		}
 		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, &rpcError{Code: -32602, Message: "invalid params"}
+			}
+		}
+		if strings.TrimSpace(p.AgentID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "agentId is required"}
 		}
 		return map[string]any{"files": s.workspace.ListArtifacts(p.AgentID)}, nil
 	case "agents.run":
@@ -2033,7 +2052,13 @@ func (s *Server) dispatchRPC(
 			AgentID string `json:"agentId"`
 		}
 		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, &rpcError{Code: -32602, Message: "invalid params"}
+			}
+		}
+		// Require agentId to prevent returning all artifacts across all agents.
+		if strings.TrimSpace(p.AgentID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "agentId is required"}
 		}
 		return map[string]any{"artifacts": s.workspace.ListArtifacts(p.AgentID)}, nil
 	case "artifacts.get":
@@ -2336,10 +2361,11 @@ func (s *Server) dispatchRPC(
 		return map[string]any{"sessionId": req.SessionID, "reply": reply}, nil
 	case "sessions.messages.subscribe":
 		var p sessionIDParams
-		if len(params) > 0 {
-			if err := json.Unmarshal(params, &p); err != nil {
-				return nil, &rpcError{Code: -32602, Message: "invalid params"}
-			}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
 		}
 		evCh, unsub := s.bus.Subscribe(p.SessionID)
 		defer unsub()
@@ -2348,7 +2374,8 @@ func (s *Server) dispatchRPC(
 		for {
 			select {
 			case ev := <-evCh:
-				if ev.Type == EventSessionMessage {
+				// Filter to only this session's message events.
+				if ev.Type == EventSessionMessage && ev.SessionID == p.SessionID {
 					events = append(events, ev)
 				}
 			case <-deadline:

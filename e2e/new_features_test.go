@@ -230,7 +230,8 @@ func TestE2E_SessionsSubscribeRPC(t *testing.T) {
 	h := newHarness(t, "")
 	defer h.close()
 
-	env := rpcNew(t, h, "sessions.subscribe", map[string]any{"sessionId": ""})
+	// sessions.subscribe requires a non-empty sessionId.
+	env := rpcNew(t, h, "sessions.subscribe", map[string]any{"sessionId": "rpc-sub-test"})
 	if env["error"] != nil {
 		t.Fatalf("sessions.subscribe rpc error: %v", env["error"])
 	}

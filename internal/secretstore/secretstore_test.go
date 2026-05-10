@@ -1,12 +1,31 @@
 package secretstore
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
+func retryTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "secretstore-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < 5; i++ {
+			if os.RemoveAll(dir) == nil {
+				return
+			}
+			time.Sleep(time.Duration(i+1) * 50 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
 func TestSecretStoreSetGetDelete(t *testing.T) {
-	s, err := New(filepath.Join(t.TempDir(), "secrets.json"))
+	s, err := New(filepath.Join(retryTempDir(t), "secrets.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
