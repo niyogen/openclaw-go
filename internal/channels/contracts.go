@@ -2,6 +2,13 @@ package channels
 
 import "context"
 
+// WebhookInboundConfig configures optional behavior for channel webhook HTTP handlers.
+type WebhookInboundConfig struct {
+	// OnHandlerError is invoked when the application inbound handler returns a
+	// non-nil error (after the webhook body passed decode/signature checks).
+	OnHandlerError func(channel string, err error, attrs map[string]any)
+}
+
 type InboundMessage struct {
 	SessionID string `json:"sessionId"`
 	Channel   string `json:"channel"`

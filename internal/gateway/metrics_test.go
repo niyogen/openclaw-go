@@ -28,6 +28,7 @@ func TestHandleMetrics_PrometheusText(t *testing.T) {
 	s.agentRunsTotal.Add(1)
 	s.agentRunsFailedTotal.Add(1)
 	s.channelDispatchErrTotal.Add(3)
+	s.channelInboundErrTotal.Add(4)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -41,6 +42,7 @@ func TestHandleMetrics_PrometheusText(t *testing.T) {
 		"openclaw_gateway_uptime_seconds",
 		"openclaw_gateway_rpc_calls_total 2",
 		"openclaw_gateway_channel_inbound_total 5",
+		"openclaw_gateway_channel_inbound_errors_total 4",
 		"openclaw_gateway_agent_runs_total 1",
 		"openclaw_gateway_agent_runs_failed_total 1",
 		"openclaw_gateway_channel_dispatch_errors_total 3",

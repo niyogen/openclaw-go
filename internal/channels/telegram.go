@@ -91,6 +91,7 @@ func (t *TelegramChannel) answerCallbackQuery(ctx context.Context, callbackQuery
 func (t *TelegramChannel) BuildWebhookHandler(
 	secret string,
 	handler func(context.Context, InboundMessage) error,
+	cfg *WebhookInboundConfig,
 ) http.HandlerFunc {
 	trimmedSecret := strings.TrimSpace(secret)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -105,8 +106,11 @@ func (t *TelegramChannel) BuildWebhookHandler(
 				return
 			}
 		}
-		body, err := io.ReadAll(r.Body)
+		body, err := readWebhookBody(w, r)
 		if err != nil {
+			if errBodyTooLarge(err) {
+				return
+			}
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -122,7 +126,12 @@ func (t *TelegramChannel) BuildWebhookHandler(
 			}
 		}
 		for _, inbound := range messagesFromUpdate(update) {
-			_ = handler(r.Context(), inbound)
+			if err := handler(r.Context(), inbound); err != nil && cfg != nil && cfg.OnHandlerError != nil {
+				cfg.OnHandlerError("telegram", err, map[string]any{
+					"sessionId": inbound.SessionID,
+					"target":    inbound.Target,
+				})
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -186,6 +195,7 @@ func SetTelegramWebhook(
 func BuildTelegramWebhookHandler(
 	secret string,
 	handler func(context.Context, InboundMessage) error,
+	cfg *WebhookInboundConfig,
 ) http.HandlerFunc {
 	trimmedSecret := strings.TrimSpace(secret)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -200,8 +210,11 @@ func BuildTelegramWebhookHandler(
 				return
 			}
 		}
-		body, err := io.ReadAll(r.Body)
+		body, err := readWebhookBody(w, r)
 		if err != nil {
+			if errBodyTooLarge(err) {
+				return
+			}
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -211,7 +224,12 @@ func BuildTelegramWebhookHandler(
 			return
 		}
 		for _, inbound := range inboundMessages {
-			_ = handler(r.Context(), inbound)
+			if err := handler(r.Context(), inbound); err != nil && cfg != nil && cfg.OnHandlerError != nil {
+				cfg.OnHandlerError("telegram", err, map[string]any{
+					"sessionId": inbound.SessionID,
+					"target":    inbound.Target,
+				})
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -236,11 +254,12 @@ func NewTelegramPoller(botToken string) *TelegramPoller {
 func (p *TelegramPoller) Start(
 	ctx context.Context,
 	handler func(context.Context, InboundMessage) error,
+	cfg *WebhookInboundConfig,
 ) {
 	if p.botToken == "" || handler == nil {
 		return
 	}
-	go p.loop(ctx, handler)
+	go p.loop(ctx, handler, cfg)
 }
 
 type telegramUpdateResponse struct {
@@ -328,6 +347,7 @@ func decodeTelegramUpdates(raw []byte) ([]InboundMessage, error) {
 func (p *TelegramPoller) loop(
 	ctx context.Context,
 	handler func(context.Context, InboundMessage) error,
+	cfg *WebhookInboundConfig,
 ) {
 	for {
 		select {
@@ -335,7 +355,7 @@ func (p *TelegramPoller) loop(
 			return
 		default:
 		}
-		if err := p.pollOnce(ctx, handler); err != nil {
+		if err := p.pollOnce(ctx, handler, cfg); err != nil {
 			select {
 			case <-ctx.Done():
 				return
@@ -348,6 +368,7 @@ func (p *TelegramPoller) loop(
 func (p *TelegramPoller) pollOnce(
 	ctx context.Context,
 	handler func(context.Context, InboundMessage) error,
+	cfg *WebhookInboundConfig,
 ) error {
 	url := fmt.Sprintf(
 		"https://api.telegram.org/bot%s/getUpdates?timeout=25&offset=%d",
@@ -390,7 +411,12 @@ func (p *TelegramPoller) pollOnce(
 			}
 		}
 		for _, inbound := range messagesFromUpdate(item) {
-			_ = handler(ctx, inbound)
+			if err := handler(ctx, inbound); err != nil && cfg != nil && cfg.OnHandlerError != nil {
+				cfg.OnHandlerError("telegram", err, map[string]any{
+					"sessionId": inbound.SessionID,
+					"target":    inbound.Target,
+				})
+			}
 		}
 	}
 	return nil

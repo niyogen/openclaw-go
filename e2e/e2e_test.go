@@ -52,6 +52,9 @@ func testTempDir(t *testing.T) string {
 	return dir
 }
 
+// e2eWhatsAppVerifyToken must match hub.verify_token on WhatsApp webhook GET checks.
+const e2eWhatsAppVerifyToken = "e2e-wa-verify"
+
 // channelHarness creates a harness with all six channel webhook routes mounted.
 func newChannelHarness(t *testing.T) *harness {
 	t.Helper()
@@ -64,7 +67,7 @@ func newChannelHarness(t *testing.T) *harness {
 
 	// Register all channel webhook routes the same way runGateway does.
 	h.server.HandleFunc("/webhooks/telegram",
-		channels.BuildTelegramWebhookHandler("", handleInbound))
+		channels.BuildTelegramWebhookHandler("", handleInbound, nil))
 	h.server.HandleFunc("/webhooks/slack",
 		channels.BuildSlackWebhookHandler("", handleInbound))
 	h.server.HandleFunc("/webhooks/discord",
@@ -72,7 +75,7 @@ func newChannelHarness(t *testing.T) *harness {
 	h.server.HandleFunc("/webhooks/teams",
 		channels.BuildTeamsWebhookHandler("", handleInbound))
 	h.server.HandleFunc("/webhooks/whatsapp",
-		channels.BuildWhatsAppWebhookHandler("", "", handleInbound))
+		channels.BuildWhatsAppWebhookHandler(e2eWhatsAppVerifyToken, "", handleInbound, nil))
 
 	return h
 }
@@ -706,9 +709,11 @@ func TestE2E_ChannelWebhooks(t *testing.T) {
 		})
 	}
 
-	// WhatsApp verify GET.
+	// WhatsApp verify GET (verify token must match handler).
+	q := fmt.Sprintf("hub.mode=subscribe&hub.verify_token=%s&hub.challenge=xyz",
+		e2eWhatsAppVerifyToken)
 	req, _ := http.NewRequest(http.MethodGet,
-		h.base+"/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=&hub.challenge=xyz", nil)
+		h.base+"/webhooks/whatsapp?"+q, nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("WhatsApp verify: %v", err)

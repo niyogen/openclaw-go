@@ -47,6 +47,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# TYPE openclaw_gateway_channel_inbound_total counter\n")
 	fmt.Fprintf(w, "openclaw_gateway_channel_inbound_total %s\n", u64str(s.channelInboundsTotal.Load()))
 
+	fmt.Fprintf(w, "# HELP openclaw_gateway_channel_inbound_errors_total Inbound dispatches where HandleInbound returned an error.\n")
+	fmt.Fprintf(w, "# TYPE openclaw_gateway_channel_inbound_errors_total counter\n")
+	fmt.Fprintf(w, "openclaw_gateway_channel_inbound_errors_total %s\n", u64str(s.channelInboundErrTotal.Load()))
+
 	fmt.Fprintf(w, "# HELP openclaw_gateway_agent_runs_total Completed agent runs (blocking + stream).\n")
 	fmt.Fprintf(w, "# TYPE openclaw_gateway_agent_runs_total counter\n")
 	fmt.Fprintf(w, "openclaw_gateway_agent_runs_total %s\n", u64str(s.agentRunsTotal.Load()))

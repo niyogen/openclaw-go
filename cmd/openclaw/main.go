@@ -965,7 +965,16 @@ func runGateway(cfg config.Config) error {
 
 	server.ApplyExtensionTools(cfg)
 
+	if cfg.Channels.WhatsApp.Enabled && strings.TrimSpace(cfg.Channels.WhatsApp.VerifyToken) == "" {
+		return fmt.Errorf("whatsapp is enabled but verify token is empty: set channels.whatsapp.verifyToken or WHATSAPP_VERIFY_TOKEN")
+	}
+
 	if cfg.Channels.Telegram.Enabled {
+		tgObs := &channels.WebhookInboundConfig{
+			OnHandlerError: func(ch string, err error, attrs map[string]any) {
+				server.RecordInboundHandlerError(ch, err, attrs)
+			},
+		}
 		inboundHandler := func(inboundCtx context.Context, inbound channels.InboundMessage) error {
 			_, err := server.HandleInbound(inboundCtx, inbound)
 			return err
@@ -983,15 +992,15 @@ func runGateway(cfg config.Config) error {
 					cfg.Channels.Telegram.BotToken,
 					cfg.Channels.Telegram.ChatID,
 				)
-				hook = tg.BuildWebhookHandler(cfg.Channels.Telegram.WebhookSecret, inboundHandler)
+				hook = tg.BuildWebhookHandler(cfg.Channels.Telegram.WebhookSecret, inboundHandler, tgObs)
 			} else {
-				hook = channels.BuildTelegramWebhookHandler(cfg.Channels.Telegram.WebhookSecret, inboundHandler)
+				hook = channels.BuildTelegramWebhookHandler(cfg.Channels.Telegram.WebhookSecret, inboundHandler, tgObs)
 			}
 			server.HandleFunc(cfg.Channels.Telegram.WebhookPath, hook)
 		default:
 			if strings.TrimSpace(cfg.Channels.Telegram.BotToken) != "" {
 				poller := channels.NewTelegramPoller(cfg.Channels.Telegram.BotToken)
-				poller.Start(ctx, inboundHandler)
+				poller.Start(ctx, inboundHandler, tgObs)
 			}
 		}
 	}
@@ -1032,6 +1041,11 @@ func runGateway(cfg config.Config) error {
 		)
 	}
 	if cfg.Channels.WhatsApp.Enabled {
+		waObs := &channels.WebhookInboundConfig{
+			OnHandlerError: func(ch string, err error, attrs map[string]any) {
+				server.RecordInboundHandlerError(ch, err, attrs)
+			},
+		}
 		server.HandleFunc(
 			cfg.Channels.WhatsApp.WebhookPath,
 			channels.BuildWhatsAppWebhookHandler(
@@ -1041,6 +1055,7 @@ func runGateway(cfg config.Config) error {
 					_, err := server.HandleInbound(inboundCtx, inbound)
 					return err
 				},
+				waObs,
 			),
 		)
 	}
@@ -1655,7 +1670,7 @@ func runDoctor(cfg config.Config, baseURL string) error {
 			fmt.Println("- warning: whatsapp enabled but phone number id missing")
 		}
 		if strings.TrimSpace(cfg.Channels.WhatsApp.VerifyToken) == "" {
-			fmt.Println("- warning: whatsapp verify token is empty")
+			fmt.Println("- error: whatsapp verify token is empty — gateway will refuse to start until WHATSAPP_VERIFY_TOKEN / channels.whatsapp.verifyToken is set")
 		}
 	}
 

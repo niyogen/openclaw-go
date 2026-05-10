@@ -64,6 +64,7 @@ type Server struct {
 	// Prometheus-style counters (see handleMetrics).
 	rpcCallsTotal           atomic.Uint64
 	channelInboundsTotal    atomic.Uint64
+	channelInboundErrTotal  atomic.Uint64 // inbound handler returned error (after webhook accepted)
 	agentRunsTotal          atomic.Uint64
 	agentRunsFailedTotal    atomic.Uint64
 	channelDispatchErrTotal atomic.Uint64
@@ -862,6 +863,23 @@ func (s *Server) HandleInbound(ctx context.Context, inbound channels.InboundMess
 		Message:   inbound.Message,
 	}
 	return s.processMessage(ctx, req)
+}
+
+// RecordInboundHandlerError increments observability counters/logs when a channel
+// webhook or poller invoked HandleInbound and it returned an error.
+func (s *Server) RecordInboundHandlerError(channel string, err error, attrs map[string]any) {
+	if err == nil {
+		return
+	}
+	s.channelInboundErrTotal.Add(1)
+	meta := map[string]any{
+		"channel": channel,
+		"error":   err.Error(),
+	}
+	for k, v := range attrs {
+		meta[k] = v
+	}
+	s.appendLog(logstore.LevelWarn, "channels", "inbound handler error: "+err.Error(), meta)
 }
 
 type rpcRequest struct {

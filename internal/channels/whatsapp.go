@@ -82,6 +82,7 @@ func BuildWhatsAppWebhookHandler(
 	verifyToken string,
 	appSecret string,
 	handler func(context.Context, InboundMessage) error,
+	cfg *WebhookInboundConfig,
 ) http.HandlerFunc {
 	expectedVerifyToken := strings.TrimSpace(verifyToken)
 	trimmedAppSecret := strings.TrimSpace(appSecret)
@@ -91,17 +92,20 @@ func BuildWhatsAppWebhookHandler(
 			mode := strings.TrimSpace(r.URL.Query().Get("hub.mode"))
 			token := strings.TrimSpace(r.URL.Query().Get("hub.verify_token"))
 			challenge := strings.TrimSpace(r.URL.Query().Get("hub.challenge"))
-			if mode == "subscribe" && challenge != "" &&
-				(expectedVerifyToken == "" || token == expectedVerifyToken) {
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(challenge))
+			// Require a configured verify token so hub.mode=subscribe cannot be satisfied blindly.
+			if expectedVerifyToken == "" || mode != "subscribe" || challenge == "" || token != expectedVerifyToken {
+				w.WriteHeader(http.StatusForbidden)
 				return
 			}
-			w.WriteHeader(http.StatusForbidden)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(challenge))
 			return
 		case http.MethodPost:
-			body, err := io.ReadAll(r.Body)
+			body, err := readWebhookBody(w, r)
 			if err != nil {
+				if errBodyTooLarge(err) {
+					return
+				}
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
@@ -115,7 +119,12 @@ func BuildWhatsAppWebhookHandler(
 				return
 			}
 			for _, inbound := range inboundMessages {
-				_ = handler(r.Context(), inbound)
+				if err := handler(r.Context(), inbound); err != nil && cfg != nil && cfg.OnHandlerError != nil {
+					cfg.OnHandlerError("whatsapp", err, map[string]any{
+						"sessionId": inbound.SessionID,
+						"target":    inbound.Target,
+					})
+				}
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"ok":true}`))

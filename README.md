@@ -78,7 +78,7 @@ Implemented MVP:
   - webhook outbound adapter
   - telegram outbound adapter (`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` or per-message `target`)
   - telegram inbound long-polling (`getUpdates`) mode
-  - telegram inbound webhook mode with optional secret-token verification
+  - telegram inbound webhook mode with optional secret-token verification (webhook POST bodies capped at 4 MiB)
   - slack outbound adapter via `chat.postMessage`
   - slack inbound Events API webhook mode with optional signature verification
   - discord outbound adapter via channel messages API
@@ -86,7 +86,7 @@ Implemented MVP:
   - teams outbound adapter via incoming webhook URL
   - teams inbound webhook bridge mode with optional token header
   - whatsapp outbound adapter via Cloud API (`/{phone_number_id}/messages`)
-  - whatsapp inbound webhook mode (GET verify + POST events, optional app-secret signature check)
+  - whatsapp inbound webhook mode (GET verify + POST events, optional app-secret signature check); when **`channels.whatsapp.enabled`** is `true`, **`WHATSAPP_VERIFY_TOKEN`** / **`channels.whatsapp.verifyToken`** is **required** (gateway refuses to start otherwise). Webhook POST bodies are capped at 4 MiB (same order as other JSON routes).
 
 State is persisted at:
 
