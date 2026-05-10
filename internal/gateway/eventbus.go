@@ -1,8 +1,6 @@
 package gateway
 
-import (
-	"sync"
-)
+import "sync"
 
 // EventType labels what happened.
 type EventType string
@@ -74,7 +72,11 @@ func NewEventBus() *EventBus {
 // Subscribe registers a channel to receive events.
 // Pass sessionID="" to receive all events; otherwise only that session's events.
 // Returns the event channel and an unsubscribe function.
-// The channel is closed when unsubscribe is called, so range loops terminate.
+//
+// IMPORTANT: Do NOT close the returned channel — Publish() may hold a
+// reference to it between reading the map and sending. Closing it while
+// Publish() is still sending causes a panic. Instead, goroutine lifetimes
+// must be bounded via a separate done/context signal (see dispatchWSFrame).
 func (b *EventBus) Subscribe(sessionID string) (<-chan GatewayEvent, func()) {
 	ch := make(chan GatewayEvent, 32)
 	b.mu.Lock()
@@ -89,9 +91,11 @@ func (b *EventBus) Subscribe(sessionID string) (<-chan GatewayEvent, func()) {
 			b.mu.Lock()
 			delete(b.subs, id)
 			b.mu.Unlock()
-			// Closing the channel signals any range-based consumer to exit,
-			// preventing goroutine leaks across tests.
-			close(ch)
+			// Drain the buffer so Publish() goroutines are never blocked
+			// (channel is NOT closed — see note above).
+			for len(ch) > 0 {
+				<-ch
+			}
 		})
 	}
 }

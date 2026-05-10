@@ -2088,15 +2088,12 @@ func (s *Server) dispatchWSFrame(ctx context.Context, frame wsFrame, send chan<-
 		// Forward events to the WS send channel until the connection closes
 		// (done is closed) or the subscription is cancelled.
 		go func() {
-			defer unsub() // closes evCh → terminates the for-range below
+			defer unsub()
 			for {
 				select {
 				case <-done:
 					return
-				case ev, ok := <-evCh:
-					if !ok {
-						return // channel closed
-					}
+				case ev := <-evCh:
 					now := time.Now().UTC()
 					select {
 					case send <- wsFrame{Type: "event", ID: frame.ID, Data: ev, Time: &now}:
