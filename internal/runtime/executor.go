@@ -194,11 +194,15 @@ func encodeResult(v any) (string, error) {
 	if v == nil {
 		return "null", nil
 	}
-	raw, err := fmt.Sprintf("%v", v), error(nil)
-	if b, jerr := json.Marshal(v); jerr == nil {
-		raw = string(b)
+	b, err := json.Marshal(v)
+	if err != nil {
+		// Fall back to a valid JSON string so the model always receives parseable JSON.
+		if safe, serr := json.Marshal(fmt.Sprintf("%v", v)); serr == nil {
+			return string(safe), nil
+		}
+		return `"[unserializable result]"`, nil
 	}
-	return raw, err
+	return string(b), nil
 }
 
 // retryingReply calls the runner with up to policy.MaxRetries retries on error.

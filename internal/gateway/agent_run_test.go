@@ -146,4 +146,7 @@ func TestRPCAgentRun(t *testing.T) {
 	if envelope.Result["reply"] == "" {
 		t.Fatal("expected non-empty reply in result")
 	}
+	if envelope.Result["runId"] == "" {
+		t.Fatal("expected non-empty runId in agent.run result")
+	}
 }

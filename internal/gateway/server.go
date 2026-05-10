@@ -883,7 +883,9 @@ func (s *Server) dispatchRPC(
 		// For real push, use the WS frame type "sessions.subscribe" instead.
 		var p sessionIDParams
 		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, &rpcError{Code: -32602, Message: "invalid params"}
+			}
 		}
 		evCh, unsub := s.bus.Subscribe(p.SessionID)
 		defer unsub()
@@ -1173,7 +1175,9 @@ func (s *Server) dispatchRPC(
 		// For persistent changes write ~/.openclaw-go/openclaw.json.
 		var patch map[string]any
 		if len(params) > 0 {
-			_ = json.Unmarshal(params, &patch)
+			if err := json.Unmarshal(params, &patch); err != nil {
+				return nil, &rpcError{Code: -32602, Message: "invalid params"}
+			}
 		}
 		// Apply known fields.
 		if tok, ok := patch["authToken"].(string); ok {
@@ -1443,7 +1447,9 @@ func (s *Server) dispatchRPC(
 			Limit     int    `json:"limit"`
 		}
 		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, &rpcError{Code: -32602, Message: "invalid params"}
+			}
 		}
 		if p.Limit <= 0 {
 			p.Limit = 50
@@ -1511,8 +1517,11 @@ func (s *Server) dispatchRPC(
 			URL    string `json:"url"`
 			APIKey string `json:"apiKey"`
 		}
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
 		n := topology.Node{ID: p.NodeID, Name: p.Name, URL: p.URL, APIKey: p.APIKey}
 		if err := s.topo.AddNode(n); err != nil {
@@ -1764,7 +1773,10 @@ func (s *Server) dispatchRPC(
 				CreatedAt: time.Now().UTC(),
 			})
 		}
+		agentRunID := generateRunID()
+		globalRunStore.put(agentRunID, result)
 		return map[string]any{
+			"runId":     agentRunID,
 			"agentId":   p.AgentID,
 			"sessionId": p.SessionID,
 			"reply":     result.FinalText,
@@ -2083,7 +2095,9 @@ func (s *Server) dispatchRPC(
 		if len(params) == 0 {
 			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
-		_ = json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
 		if err := s.store.Patch(p.SessionID, p.Patches); err != nil {
 			return nil, &rpcError{Code: -32000, Message: err.Error()}
 		}
@@ -2102,7 +2116,9 @@ func (s *Server) dispatchRPC(
 		if len(params) == 0 {
 			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
-		_ = json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "id is required"}
+		}
 		if req, ok := s.approvals.Get(p.ID); ok {
 			return map[string]any{"approval": req}, nil
 		}
