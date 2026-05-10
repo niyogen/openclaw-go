@@ -60,7 +60,9 @@ func NewWorkspace(path string) (*Workspace, error) {
 		agents:    map[string]*AgentProfile{},
 		artifacts: map[string]*Artifact{},
 	}
-	_ = w.load()
+	if err := w.load(); err != nil {
+		return nil, err
+	}
 	return w, nil
 }
 

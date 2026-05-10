@@ -2,7 +2,7 @@ package agents
 
 import (
 	"context"
-	"strings"
+	"unicode/utf8"
 )
 
 // StreamChunk is a single token/chunk delivered during streaming.
@@ -30,15 +30,12 @@ func SimulatedStream(ctx context.Context, r Runner, turn Turn, out chan<- Stream
 		out <- StreamChunk{Err: err}
 		return
 	}
-	// Deliver word-by-word for runners that don't natively stream,
-	// so clients still see progressive output.
-	words := strings.Fields(reply)
-	for i, w := range words {
-		sep := " "
-		if i == 0 {
-			sep = ""
-		}
-		out <- StreamChunk{Delta: sep + w}
+	// Deliver rune-by-rune so clients see progressive output without collapsing
+	// whitespace or newlines (strings.Fields would lose formatting).
+	for i := 0; i < len(reply); {
+		_, size := utf8.DecodeRuneInString(reply[i:])
+		out <- StreamChunk{Delta: reply[i : i+size]}
+		i += size
 	}
 	out <- StreamChunk{Done: true}
 }

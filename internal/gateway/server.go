@@ -588,12 +588,16 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 	}); err != nil {
 		return "", err
 	}
-	_ = s.route.Dispatch(ctx, channels.OutboundMessage{
+	if dispatchErr := s.route.Dispatch(ctx, channels.OutboundMessage{
 		SessionID: req.SessionID,
 		Channel:   req.Channel,
 		Target:    req.Target,
 		Message:   reply,
-	})
+	}); dispatchErr != nil {
+		s.logs.Append(logstore.LevelWarn, "channels", //nolint:errcheck
+			"outbound dispatch failed: "+dispatchErr.Error(),
+			map[string]any{"sessionId": req.SessionID, "channel": req.Channel})
+	}
 	s.hooks.Emit(hookstore.EventMessageSent, map[string]any{
 		"sessionId": req.SessionID, "channel": req.Channel, "reply": reply,
 	})
@@ -848,10 +852,14 @@ func (s *Server) dispatchRPC(
 				CreatedAt: time.Now().UTC(),
 			})
 		}
+		runID := generateRunID()
+		globalRunStore.put(runID, result)
 		return map[string]any{
-			"reply": result.FinalText,
-			"turns": len(result.Turns),
-			"error": errStr,
+			"runId":     runID,
+			"sessionId": req.SessionID,
+			"reply":     result.FinalText,
+			"turns":     len(result.Turns),
+			"error":     errStr,
 		}, nil
 	case "approvals.list":
 		return map[string]any{"approvals": s.approvals.List()}, nil

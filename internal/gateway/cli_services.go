@@ -169,7 +169,9 @@ func (s *Server) rpcLogs(params json.RawMessage) (any, *rpcError) {
 		Limit     int    `json:"limit"`
 	}
 	if len(params) > 0 {
-		_ = json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
 	}
 	if p.Limit <= 0 {
 		p.Limit = 100
@@ -202,8 +204,7 @@ func (s *Server) rpcCronDelete(params json.RawMessage) (any, *rpcError) {
 	if len(params) == 0 {
 		return nil, &rpcError{Code: -32602, Message: "invalid params"}
 	}
-	_ = json.Unmarshal(params, &p)
-	if strings.TrimSpace(p.ID) == "" {
+	if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.ID) == "" {
 		return nil, &rpcError{Code: -32602, Message: "id is required"}
 	}
 	deleted, err := s.cron.Remove(p.ID)
@@ -258,8 +259,7 @@ func (s *Server) rpcSecretsGet(params json.RawMessage) (any, *rpcError) {
 	if len(params) == 0 {
 		return nil, &rpcError{Code: -32602, Message: "invalid params"}
 	}
-	_ = json.Unmarshal(params, &p)
-	if strings.TrimSpace(p.Name) == "" {
+	if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.Name) == "" {
 		return nil, &rpcError{Code: -32602, Message: "name is required"}
 	}
 	val, err := s.secrets.Get(p.Name)
@@ -280,8 +280,7 @@ func (s *Server) rpcSecretsDelete(params json.RawMessage) (any, *rpcError) {
 	if len(params) == 0 {
 		return nil, &rpcError{Code: -32602, Message: "invalid params"}
 	}
-	_ = json.Unmarshal(params, &p)
-	if strings.TrimSpace(p.Name) == "" {
+	if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.Name) == "" {
 		return nil, &rpcError{Code: -32602, Message: "name is required"}
 	}
 	deleted, err := s.secrets.Delete(p.Name)

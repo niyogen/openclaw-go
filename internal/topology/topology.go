@@ -72,7 +72,9 @@ func New(path string) (*Store, error) {
 		devices: map[string]*Device{},
 		pairing: map[string]*PairingRequest{},
 	}
-	_ = s.load()
+	if err := s.load(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 

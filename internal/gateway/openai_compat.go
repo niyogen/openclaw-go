@@ -285,21 +285,32 @@ func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request)
 		model = "openclaw-go"
 	}
 
-	lastMsg := req.Messages[len(req.Messages)-1]
+	// Build Turn respecting the role of every message.
+	// All messages go into History; if the last message is from the user it
+	// is also set as turn.Message (the current prompt).  Other roles (assistant,
+	// system) are left in history only so buildMessages does not double-append.
 	var history []agents.HistoryMessage
-	for _, m := range req.Messages[:len(req.Messages)-1] {
+	for _, m := range req.Messages {
 		history = append(history, agents.HistoryMessage{Role: m.Role, Content: m.Content})
 	}
-	turn := agents.Turn{Message: lastMsg.Content, History: history}
+	lastMsg := req.Messages[len(req.Messages)-1]
+	currentMsg := ""
+	if strings.ToLower(strings.TrimSpace(lastMsg.Role)) == "user" {
+		currentMsg = lastMsg.Content
+		// Remove the last user message from history to avoid duplication with
+		// turn.Message (buildMessages appends turn.Message separately).
+		history = history[:len(history)-1]
+	}
+	turn := agents.Turn{Message: currentMsg, History: history}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
 	if req.Stream {
-		s.handleV1ChatStream(w, ctx, model, lastMsg.Content, turn)
+		s.handleV1ChatStream(w, ctx, model, currentMsg, turn)
 		return
 	}
-	s.handleV1ChatBlocking(w, ctx, model, lastMsg.Content, turn)
+	s.handleV1ChatBlocking(w, ctx, model, currentMsg, turn)
 }
 
 func (s *Server) handleV1ChatBlocking(

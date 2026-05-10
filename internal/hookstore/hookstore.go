@@ -46,12 +46,17 @@ type Hook struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// maxConcurrentDispatches limits how many webhook goroutines may run at once
+// to prevent burst events from exhausting goroutine/connection resources.
+const maxConcurrentDispatches = 32
+
 // Store holds hooks and provides event dispatch.
 type Store struct {
-	mu     sync.Mutex
-	hooks  map[string]*Hook
-	path   string
-	client *http.Client
+	mu       sync.Mutex
+	hooks    map[string]*Hook
+	path     string
+	client   *http.Client
+	dispSem  chan struct{} // semaphore bounding concurrent dispatches
 }
 
 // New opens (or creates) a hook store backed by path.
@@ -59,10 +64,15 @@ func New(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
+	sem := make(chan struct{}, maxConcurrentDispatches)
+	for i := 0; i < maxConcurrentDispatches; i++ {
+		sem <- struct{}{}
+	}
 	s := &Store{
-		path:   path,
-		hooks:  map[string]*Hook{},
-		client: &http.Client{Timeout: 10 * time.Second},
+		path:    path,
+		hooks:   map[string]*Hook{},
+		client:  &http.Client{Timeout: 10 * time.Second},
+		dispSem: sem,
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -123,11 +133,20 @@ func (s *Store) ForEvent(event EventType) []Hook {
 	return out
 }
 
-// Emit fires hooks registered for event (fire-and-forget).
+// Emit fires hooks registered for event (fire-and-forget, bounded concurrency).
 func (s *Store) Emit(event EventType, payload map[string]any) {
 	hooks := s.ForEvent(event)
 	for _, h := range hooks {
-		go s.dispatch(h, payload)
+		h := h
+		select {
+		case <-s.dispSem:
+			go func() {
+				defer func() { s.dispSem <- struct{}{} }()
+				s.dispatch(h, payload)
+			}()
+		default:
+			// Semaphore full — drop this dispatch rather than blocking or spawning.
+		}
 	}
 }
 
