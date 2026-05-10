@@ -14,6 +14,7 @@ import (
 
 	"openclaw-go/internal/agents"
 	"openclaw-go/internal/channels"
+	"openclaw-go/internal/config"
 	"openclaw-go/internal/cronstore"
 	"openclaw-go/internal/hookstore"
 	"openclaw-go/internal/logstore"
@@ -1258,22 +1259,32 @@ func (s *Server) dispatchRPC(
 		}
 		return map[string]any{"key": p.Key, "description": "no description available"}, nil
 	case "config.apply", "config.set", "config.patch":
-		// Runtime config mutation — applies to in-memory state only.
-		// For persistent changes write ~/.openclaw-go/openclaw.json.
 		var patch map[string]any
 		if len(params) > 0 {
 			if err := json.Unmarshal(params, &patch); err != nil {
 				return nil, &rpcError{Code: -32602, Message: "invalid params"}
 			}
 		}
-		// Apply known fields.
+		// Apply known fields to in-memory state.
 		if tok, ok := patch["authToken"].(string); ok {
 			s.authToken = strings.TrimSpace(tok)
 		}
 		if password, ok := patch["password"].(string); ok {
 			s.password = strings.TrimSpace(password)
 		}
-		return map[string]any{"ok": true, "applied": len(patch), "note": "in-memory only; restart to persist"}, nil
+		// Persist to config file so changes survive restart.
+		if cfgPath, err := config.DefaultPath(); err == nil {
+			if cfg, err := config.Load(cfgPath); err == nil {
+				if tok, ok := patch["authToken"].(string); ok {
+					cfg.Gateway.AuthToken = strings.TrimSpace(tok)
+				}
+				if password, ok := patch["password"].(string); ok {
+					cfg.Gateway.Password = strings.TrimSpace(password)
+				}
+				_ = config.Save(cfgPath, cfg)
+			}
+		}
+		return map[string]any{"ok": true, "applied": len(patch)}, nil
 
 	// ── doctor.* ───────────────────────────────────────────────────────────
 	case "doctor.check":
