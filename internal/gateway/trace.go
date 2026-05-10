@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -19,11 +20,25 @@ func newTraceID() string {
 	return fmt.Sprintf("req-%d-%d", time.Now().UnixNano(), seq)
 }
 
+// pickRequestTraceID returns X-Request-ID from the client when sane, else a new id.
+func pickRequestTraceID(r *http.Request) string {
+	raw := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+	if raw == "" {
+		return newTraceID()
+	}
+	raw = strings.ReplaceAll(raw, "\n", "")
+	raw = strings.ReplaceAll(raw, "\r", "")
+	if len(raw) > 128 {
+		raw = raw[:128]
+	}
+	return raw
+}
+
 // withTrace is a middleware that attaches a trace ID to every request and
 // logs entry/exit to the gateway log store.
 func (s *Server) withTrace(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := newTraceID()
+		id := pickRequestTraceID(r)
 		ctx := context.WithValue(r.Context(), traceKey{}, id)
 		r = r.WithContext(ctx)
 
@@ -37,7 +52,7 @@ func (s *Server) withTrace(next http.Handler) http.Handler {
 		}
 
 		start := time.Now()
-		s.logs.Append("debug", "trace", fmt.Sprintf("→ %s %s", r.Method, r.URL.Path), map[string]any{
+		_ = s.logs.Append("debug", "trace", fmt.Sprintf("→ %s %s", r.Method, r.URL.Path), map[string]any{
 			"requestId": id,
 			"remote":    clientIP(r),
 		})
@@ -45,7 +60,7 @@ func (s *Server) withTrace(next http.Handler) http.Handler {
 		rw := &statusRecorder{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rw, r)
 
-		s.logs.Append("debug", "trace", fmt.Sprintf("← %d %s %s (%s)", rw.status, r.Method, r.URL.Path, time.Since(start)), map[string]any{
+		_ = s.logs.Append("debug", "trace", fmt.Sprintf("← %d %s %s (%s)", rw.status, r.Method, r.URL.Path, time.Since(start)), map[string]any{
 			"requestId":  id,
 			"statusCode": rw.status,
 			"durationMs": time.Since(start).Milliseconds(),

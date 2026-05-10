@@ -184,7 +184,10 @@ func TestSessionSetModelEndpoint(t *testing.T) {
 	}
 
 	// Verify via GET /sessions/{id}.
-	getResp, _ := http.Get(ts.URL + "/sessions/model-test")
+	getResp, err := http.Get(ts.URL + "/sessions/model-test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer getResp.Body.Close()
 	var body struct {
 		Provider string `json:"provider"`

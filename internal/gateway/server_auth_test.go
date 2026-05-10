@@ -71,6 +71,77 @@ func TestHealthRouteIsPublic(t *testing.T) {
 	}
 }
 
+func TestMetricsRouteIsPublic(t *testing.T) {
+	s := buildTestServer(t, "secret123")
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Fatalf("content-type: %q", ct)
+	}
+}
+
+func TestMetricsRequireAuthRejectsWithoutCredentials(t *testing.T) {
+	s := buildTestServer(t, "secret123")
+	s.SetMetricsRequireAuth(true)
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestMetricsRequireAuthAcceptsBearer(t *testing.T) {
+	s := buildTestServer(t, "secret123")
+	s.SetMetricsRequireAuth(true)
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer secret123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestMetricsRequireAuthNoEffectWithoutGatewayAuth(t *testing.T) {
+	s := buildTestServer(t, "") // no token
+	s.SetMetricsRequireAuth(true)
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 when gateway auth disabled, got %d", resp.StatusCode)
+	}
+}
+
 func TestSessionsRouteRequiresAuthWhenEnabled(t *testing.T) {
 	s := buildTestServer(t, "secret123")
 	ts := httptest.NewServer(s.mux)

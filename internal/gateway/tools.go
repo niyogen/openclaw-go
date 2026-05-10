@@ -47,6 +47,7 @@ type ToolInvokeRequest struct {
 type ToolHandler func(context.Context, map[string]any) (any, error)
 
 type ToolRegistry struct {
+	mu       sync.RWMutex
 	tools    []Tool
 	handlers map[string]ToolHandler
 }
@@ -59,16 +60,47 @@ func NewToolRegistry() *ToolRegistry {
 }
 
 func (r *ToolRegistry) Register(tool Tool, handler ToolHandler) {
+	if r == nil {
+		return
+	}
 	name := strings.TrimSpace(tool.Name)
 	if name == "" || handler == nil {
 		return
 	}
 	tool.Name = name
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.tools = append(r.tools, tool)
 	r.handlers[name] = handler
 }
 
+// UnregisterByPrefix removes tools whose names start with prefix (e.g. "mcp." / "skill.").
+func (r *ToolRegistry) UnregisterByPrefix(prefix string) {
+	if r == nil || prefix == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name := range r.handlers {
+		if strings.HasPrefix(name, prefix) {
+			delete(r.handlers, name)
+		}
+	}
+	nt := r.tools[:0]
+	for _, t := range r.tools {
+		if !strings.HasPrefix(t.Name, prefix) {
+			nt = append(nt, t)
+		}
+	}
+	r.tools = nt
+}
+
 func (r *ToolRegistry) List() []Tool {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]Tool, len(r.tools))
 	copy(out, r.tools)
 	return out
@@ -82,7 +114,9 @@ func (r *ToolRegistry) Invoke(ctx context.Context, req ToolInvokeRequest) (any, 
 	if name == "" {
 		return nil, errors.New("tool name is required")
 	}
+	r.mu.RLock()
 	handler, ok := r.handlers[name]
+	r.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("tool %q not found", name)
 	}

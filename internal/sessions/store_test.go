@@ -70,6 +70,24 @@ func TestSessionMaxMessagesCap(t *testing.T) {
 	}
 }
 
+func TestMemoryInlineCompaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.json")
+	store, _ := New(path)
+	store.SetMemoryCompaction(2, true)
+	_ = store.UpsertSession("m", "cli", "")
+	for i := 0; i < 5; i++ {
+		_ = store.AppendMessage("m", Message{
+			Role:      RoleUser,
+			Content:   "x",
+			CreatedAt: time.Now().UTC(),
+		})
+	}
+	hist, _ := store.History("m")
+	if len(hist) != 2 {
+		t.Fatalf("expected 2 after memory compaction, got %d", len(hist))
+	}
+}
+
 func TestStoreDelete(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.json")
 	store, err := New(path)

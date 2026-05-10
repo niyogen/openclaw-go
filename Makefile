@@ -12,7 +12,7 @@ BUILD_DIR  := dist
 LDFLAGS    := -s -w -X $(MODULE)/internal/gateway.Version=$(VERSION)
 
 .PHONY: all build fmt vet test test-race e2e e2e-ps lint clean \
-        run-gateway docker-build docker-run release help
+        run-gateway docker-build docker-run release help smoke
 
 ## Default target
 all: fmt vet test build
@@ -47,6 +47,9 @@ e2e-sh: build ## Run shell E2E smoke test (Linux/macOS)
 
 e2e-ps: build ## Run PowerShell E2E smoke test (Windows)
 	pwsh -File scripts/e2e.ps1 -SkipBuild
+
+smoke: ## Quick curl smoke (gateway must already be running; see scripts/smoke.sh)
+	bash scripts/smoke.sh
 
 lint: ## Run staticcheck (install: go install honnef.co/go/tools/cmd/staticcheck@latest)
 	staticcheck ./...

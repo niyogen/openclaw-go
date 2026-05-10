@@ -1,4 +1,4 @@
-﻿package gateway
+package gateway
 
 import (
 	"context"
@@ -31,35 +31,52 @@ import (
 )
 
 type Server struct {
-	host            string
-	port            int
-	authToken       string
-	password        string
-	trustedProxies  []string
-	allowedOrigins  map[string]struct{}
-	store           *sessions.Store
-	runner          agents.Runner
-	route           *channels.Router
-	registry        *plugins.Registry
-	tools           *ToolRegistry
-	approvals       *runtime.ApprovalQueue
-	logs            *logstore.Store
-	cron            *cronstore.Store
-	hooks           *hookstore.Store
-	secrets         *secretstore.Store
-	rateLimiter     *RateLimiter
-	bus             *EventBus
-	shutdownMu      sync.Mutex
-	shutdownFn      func()
-	topo            *topology.Store
-	workspace       *agents.Workspace
-	mux                    *http.ServeMux
-	startedAt              time.Time
-	shutdownTimeout        time.Duration
-	defaultMaxContextMsgs  int
-	runnerFactory          func(provider, model string) agents.Runner
-	runnerCache            map[string]agents.Runner
-	runnerCacheMu          sync.Mutex
+	host                  string
+	port                  int
+	authToken             string
+	password              string
+	trustedProxies        []string
+	allowedOrigins        map[string]struct{}
+	store                 *sessions.Store
+	runner                agents.Runner
+	route                 *channels.Router
+	registry              *plugins.Registry
+	tools                 *ToolRegistry
+	approvals             *runtime.ApprovalQueue
+	logs                  *logstore.Store
+	cron                  *cronstore.Store
+	hooks                 *hookstore.Store
+	secrets               *secretstore.Store
+	rateLimiter           *RateLimiter
+	bus                   *EventBus
+	shutdownMu            sync.Mutex
+	shutdownFn            func()
+	topo                  *topology.Store
+	workspace             *agents.Workspace
+	mux                   *http.ServeMux
+	startedAt             time.Time
+	shutdownTimeout       time.Duration
+	defaultMaxContextMsgs int
+	runnerFactory         func(provider, model string) agents.Runner
+	runnerCache           map[string]agents.Runner
+	runnerCacheMu         sync.Mutex
+	metricsRequireAuth    atomic.Bool
+	// Prometheus-style counters (see handleMetrics).
+	rpcCallsTotal           atomic.Uint64
+	channelInboundsTotal    atomic.Uint64
+	agentRunsTotal          atomic.Uint64
+	agentRunsFailedTotal    atomic.Uint64
+	channelDispatchErrTotal atomic.Uint64
+	nodeBreakerReg          *nodeBreakerRegistry
+	nodeInvokeStats         *nodeInvokeStatsRegistry
+
+	extMu    sync.RWMutex
+	skillCfg []config.SkillConfig
+	mcpCfg   []config.MCPServerConfig
+
+	memoryMu           sync.RWMutex
+	memoryCompactAfter int
+	memorySummarize    bool
 }
 
 func New(
@@ -137,6 +154,8 @@ func New(
 	}
 	s.shutdownTimeout = 5 * time.Second
 	s.runnerCache = map[string]agents.Runner{}
+	s.nodeBreakerReg = newNodeBreakerRegistry(defaultNodeCircuitSettings())
+	s.nodeInvokeStats = newNodeInvokeStatsRegistry()
 	// Final nil-guard: if every storage path attempt has failed, use a
 	// guaranteed temp path so handlers never nil-panic on s.topo/s.workspace.
 	if s.topo == nil {
@@ -236,6 +255,12 @@ func (s *Server) SetAuthToken(token string) {
 // SetAllowedOrigins replaces the CORS/WS origin allowlist. Safe to call after Run().
 func (s *Server) SetAllowedOrigins(origins []string) {
 	s.allowedOrigins = normalizeOrigins(origins)
+}
+
+// SetMetricsRequireAuth controls whether GET /metrics requires the same credentials
+// as other gateway routes. Safe to call after Run() (e.g. SIGHUP reload).
+func (s *Server) SetMetricsRequireAuth(require bool) {
+	s.metricsRequireAuth.Store(require)
 }
 
 // RegisterExternalPlugin registers an external plugin with the gateway at
@@ -343,6 +368,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 func (s *Server) registerRoutes() {
 	cors := s.withCORSMiddleware
+	s.mux.HandleFunc("/metrics", s.handleMetrics)
 	s.mux.HandleFunc("/health", cors(s.handleHealth))
 	s.mux.Handle("GET /tools", cors(s.withAuth(s.handleToolsList)))
 	s.mux.Handle("POST /tools/invoke", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleToolsInvoke)))))
@@ -801,6 +827,7 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 		Target:    req.Target,
 		Message:   reply,
 	}); dispatchErr != nil {
+		s.channelDispatchErrTotal.Add(1)
 		s.appendLog(logstore.LevelWarn, "channels", //nolint:errcheck
 			"outbound dispatch failed: "+dispatchErr.Error(),
 			map[string]any{"sessionId": req.SessionID, "channel": req.Channel})
@@ -823,6 +850,7 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 }
 
 func (s *Server) HandleInbound(ctx context.Context, inbound channels.InboundMessage) (string, error) {
+	s.channelInboundsTotal.Add(1)
 	sessionID := inbound.SessionID
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%s:%s", inbound.Channel, inbound.Target)
@@ -880,6 +908,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	s.rpcCallsTotal.Add(1)
 	result, rpcErr := s.dispatchRPC(r.Context(), req.Method, req.Params)
 	if rpcErr != nil {
 		writeJSON(w, http.StatusOK, rpcResponse{
@@ -898,13 +927,14 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) gatewayStatus() map[string]any {
 	return map[string]any{
-		"ok":          true,
-		"service":     "openclaw-go-gateway",
-		"version":     Version,
-		"address":     s.Address(),
-		"authEnabled": strings.TrimSpace(s.authToken) != "" || strings.TrimSpace(s.password) != "",
-		"uptime":      time.Since(s.startedAt).String(),
-		"time":        time.Now().UTC(),
+		"ok":                 true,
+		"service":            "openclaw-go-gateway",
+		"version":            Version,
+		"address":            s.Address(),
+		"authEnabled":        strings.TrimSpace(s.authToken) != "" || strings.TrimSpace(s.password) != "",
+		"metricsRequireAuth": s.metricsRequireAuth.Load(),
+		"uptime":             time.Since(s.startedAt).String(),
+		"time":               time.Now().UTC(),
 	}
 }
 
@@ -1072,6 +1102,7 @@ func (s *Server) dispatchRPC(
 				CreatedAt: time.Now().UTC(),
 			})
 		}
+		s.maintainSessionMemory(ctx, req.SessionID)
 		runID := generateRunID()
 		globalRunStore.put(runID, result)
 		return map[string]any{
@@ -1517,27 +1548,11 @@ func (s *Server) dispatchRPC(
 		return map[string]any{"logs": s.logs.List(p.Level, p.Component, p.Limit)}, nil
 	// ── skills.* ─────────────────────────────────────────────────────────
 	case "skills.status":
-		return map[string]any{"skills": []any{}, "count": 0, "message": "no skills configured; add skills to ~/.openclaw-go/openclaw.json"}, nil
+		return s.SkillsStatus(), nil
 	case "skills.search":
-		var p struct {
-			Query string `json:"query"`
-		}
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
-		}
-		return map[string]any{"results": []any{}, "query": p.Query}, nil
+		return s.SkillsSearch(params), nil
 	case "skills.detail":
-		var p struct {
-			Name string `json:"name"`
-		}
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
-		}
-		return map[string]any{
-			"name":   p.Name,
-			"status": "not_implemented",
-			"note":   "skill registry not configured",
-		}, nil
+		return s.SkillsDetail(params), nil
 	case "skills.bins":
 		return map[string]any{"bins": []any{}}, nil
 	case "skills.install":
@@ -1559,9 +1574,35 @@ func (s *Server) dispatchRPC(
 
 	// ── update.* ──────────────────────────────────────────────────────────
 	case "update.status":
-		return map[string]any{"currentVersion": Version, "updateAvailable": false}, nil
+		ctx2, cancel := context.WithTimeout(ctx, 6*time.Second)
+		defer cancel()
+		latest, page, err := LatestReleaseCheckFn(ctx2)
+		out := map[string]any{
+			"currentVersion":  Version,
+			"latestVersion":   latest,
+			"releasesPage":    page,
+			"updateAvailable": UpdateAvailable(Version, latest),
+		}
+		if err != nil {
+			out["checkError"] = err.Error()
+		}
+		return out, nil
 	case "update.run":
-		return map[string]any{"ok": true, "note": "automated update not implemented; download new binary from releases"}, nil
+		ctx2, cancel := context.WithTimeout(ctx, 6*time.Second)
+		defer cancel()
+		latest, page, err := LatestReleaseCheckFn(ctx2)
+		out := map[string]any{
+			"ok":              true,
+			"currentVersion":  Version,
+			"latestVersion":   latest,
+			"releasesPage":    page,
+			"updateAvailable": UpdateAvailable(Version, latest),
+			"note":            "Automated binary replacement is not performed; download the release asset or use your package manager, then restart the gateway.",
+		}
+		if err != nil {
+			out["checkError"] = err.Error()
+		}
+		return out, nil
 
 	// ── doctor.memory.* ──────────────────────────────────────────────────
 	case "doctor.memory", "doctor.memory.check":
@@ -1597,6 +1638,14 @@ func (s *Server) dispatchRPC(
 			"ok":      true,
 			"uptime":  time.Since(s.startedAt).String(),
 			"version": Version,
+		}, nil
+	case "tracing.status":
+		return map[string]any{
+			"ok":                    true,
+			"requestIdHeader":       "X-Request-ID",
+			"clientRequestIdEcho":   true,
+			"openTelemetryExporter": false,
+			"note":                  "Each request gets X-Request-ID; send X-Request-ID to correlate client and gateway logs. OpenTelemetry SDK export is not wired in this build.",
 		}, nil
 
 	// ── environments ──────────────────────────────────────────────────────
@@ -1808,20 +1857,43 @@ func (s *Server) dispatchRPC(
 		}
 		return map[string]any{"nodes": pending}, nil
 	case "node.invoke":
-		// Forward an RPC call to a remote node.
 		var p struct {
 			NodeID string          `json:"nodeId"`
 			Method string          `json:"method"`
 			Params json.RawMessage `json:"params"`
 		}
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if strings.TrimSpace(p.NodeID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "nodeId is required"}
 		}
 		node, ok := s.topo.GetNode(p.NodeID)
 		if !ok {
 			return nil, &rpcError{Code: -32001, Message: "node not found: " + p.NodeID}
 		}
-		return map[string]any{"nodeId": node.ID, "note": "remote invocation not implemented", "method": p.Method}, nil
+		nodeID := strings.TrimSpace(p.NodeID)
+		br := s.nodeBreakerReg.get(nodeID)
+		if err := br.before(); err != nil {
+			s.nodeInvokeStats.record(nodeID, "circuit_open", 0)
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		t0 := time.Now()
+		out, rpcErr := forwardNodeRPC(ctx, node, p.Method, p.Params)
+		dt := time.Since(t0)
+		if rpcErr != nil {
+			s.nodeInvokeStats.record(nodeID, "failure", dt)
+			if shouldTripNodeCircuit(rpcErr) {
+				br.recordFailure()
+			}
+			return nil, rpcErr
+		}
+		br.recordSuccess()
+		s.nodeInvokeStats.record(nodeID, "success", dt)
+		return out, nil
 	case "node.event":
 		var p struct {
 			NodeID string `json:"nodeId"`
@@ -2047,6 +2119,7 @@ func (s *Server) dispatchRPC(
 				CreatedAt: time.Now().UTC(),
 			})
 		}
+		s.maintainSessionMemory(ctx, p.SessionID)
 		agentRunID := generateRunID()
 		globalRunStore.put(agentRunID, result)
 		return map[string]any{
@@ -2712,22 +2785,6 @@ func (s *Server) withCORSMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Vary", "Origin")
 		}
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next(w, r)
-	}
-}
-
-// withCORS is a package-level alias kept for callers that don't have Server
-// context; it uses the permissive wildcard policy.
-func withCORS(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-OpenClaw-Token")
-		w.Header().Set("Access-Control-Max-Age", "86400")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

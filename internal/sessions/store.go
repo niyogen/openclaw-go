@@ -72,6 +72,10 @@ type Store struct {
 	mu          sync.Mutex
 	sessions    map[string]*Session
 	maxMessages int
+	// Memory compaction: when memoryInlineTrim is true, after each append we trim
+	// the oldest messages if count exceeds memoryCompactAfter.
+	memoryCompactAfter int
+	memoryInlineTrim   bool
 }
 
 func New(path string) (*Store, error) {
@@ -120,6 +124,16 @@ func (s *Store) SetMaxMessages(n int) {
 	s.maxMessages = n
 }
 
+// SetMemoryCompaction configures sliding-window trimming in AppendMessage / SetMessages.
+// When inlineTrim is true and compactAfter > 0, persisted messages are trimmed from the
+// front whenever the count would exceed compactAfter (no LLM summarization).
+func (s *Store) SetMemoryCompaction(compactAfter int, inlineTrim bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.memoryCompactAfter = compactAfter
+	s.memoryInlineTrim = inlineTrim
+}
+
 func (s *Store) AppendMessage(sessionID string, msg Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -130,6 +144,10 @@ func (s *Store) AppendMessage(sessionID string, msg Message) error {
 	current.Messages = append(current.Messages, msg)
 	if s.maxMessages > 0 && len(current.Messages) > s.maxMessages {
 		excess := len(current.Messages) - s.maxMessages
+		current.Messages = current.Messages[excess:]
+	}
+	if s.memoryInlineTrim && s.memoryCompactAfter > 0 && len(current.Messages) > s.memoryCompactAfter {
+		excess := len(current.Messages) - s.memoryCompactAfter
 		current.Messages = current.Messages[excess:]
 	}
 	current.UpdatedAt = time.Now().UTC()
@@ -336,6 +354,27 @@ func (s *Store) Compact(sessionID string, keepN int) (int, error) {
 	sess.Messages = sess.Messages[removed:]
 	sess.UpdatedAt = time.Now().UTC()
 	return removed, s.saveLocked()
+}
+
+// SetMessages replaces the entire message list for a session (used after summarization).
+func (s *Store) SetMessages(sessionID string, msgs []Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return errors.New("session not found")
+	}
+	sess.Messages = deepCopyMessages(msgs)
+	if s.maxMessages > 0 && len(sess.Messages) > s.maxMessages {
+		excess := len(sess.Messages) - s.maxMessages
+		sess.Messages = sess.Messages[excess:]
+	}
+	if s.memoryInlineTrim && s.memoryCompactAfter > 0 && len(sess.Messages) > s.memoryCompactAfter {
+		excess := len(sess.Messages) - s.memoryCompactAfter
+		sess.Messages = sess.Messages[excess:]
+	}
+	sess.UpdatedAt = time.Now().UTC()
+	return s.saveLocked()
 }
 
 // Stats returns summary statistics for a session.

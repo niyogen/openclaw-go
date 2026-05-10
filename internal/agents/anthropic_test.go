@@ -72,7 +72,7 @@ func TestAnthropicSystemContextPrependedToUser(t *testing.T) {
 func TestAnthropicEmptyContentSkipped(t *testing.T) {
 	turn := Turn{
 		History: []HistoryMessage{
-			{Role: "user", Content: ""},    // should be skipped
+			{Role: "user", Content: ""}, // should be skipped
 			{Role: "assistant", Content: "response"},
 		},
 		Message: "next",

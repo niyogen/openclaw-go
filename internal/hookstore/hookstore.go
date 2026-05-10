@@ -52,11 +52,11 @@ const maxConcurrentDispatches = 32
 
 // Store holds hooks and provides event dispatch.
 type Store struct {
-	mu       sync.Mutex
-	hooks    map[string]*Hook
-	path     string
-	client   *http.Client
-	dispSem  chan struct{} // semaphore bounding concurrent dispatches
+	mu      sync.Mutex
+	hooks   map[string]*Hook
+	path    string
+	client  *http.Client
+	dispSem chan struct{} // semaphore bounding concurrent dispatches
 }
 
 // New opens (or creates) a hook store backed by path.

@@ -617,7 +617,25 @@ func main() {
 				os.Exit(1)
 			}
 		case "run":
-			fmt.Println("Automated update not implemented. Download the latest release from:")
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			latest, page, err := gateway.FetchDefaultRepoLatestRelease(ctx)
+			fmt.Println("Update check (openclaw-go on GitHub):")
+			if err != nil {
+				fmt.Printf("  error: %v\n", err)
+			} else {
+				fmt.Printf("  latest release tag: %s\n", latest)
+				if page != "" {
+					fmt.Printf("  releases: %s\n", page)
+				}
+				fmt.Printf("  this binary version: %s\n", gateway.Version)
+				if gateway.UpdateAvailable(gateway.Version, latest) {
+					fmt.Println("  status: a newer release may be available — replace the binary manually or use your package manager.")
+				} else {
+					fmt.Println("  status: you appear to be on the latest or a dev/custom build.")
+				}
+			}
+			fmt.Println("Automated install is not performed. See:")
 			fmt.Println("  https://github.com/niyogen/openclaw-go/releases")
 		default:
 			if err := rpc(baseURL+"/rpc", "update.status", map[string]any{}); err != nil {
@@ -678,6 +696,7 @@ func printUsage() {
 	fmt.Println("  openclaw config init|show")
 	fmt.Println("  openclaw configure gateway auth-token <token>")
 	fmt.Println("  openclaw configure gateway allowed-origins <csv>")
+	fmt.Println("  openclaw configure gateway metrics-require-auth <true|false>")
 	fmt.Println("  openclaw configure set-agent-provider <echo|openai|anthropic>")
 	fmt.Println("  openclaw configure telegram inbound-mode <polling|webhook>")
 	fmt.Println("  openclaw configure telegram enable <true|false>")
@@ -837,11 +856,21 @@ func runGateway(cfg config.Config) error {
 	if cfg.Gateway.ShutdownTimeout > 0 {
 		server.SetShutdownTimeout(time.Duration(cfg.Gateway.ShutdownTimeout) * time.Second)
 	}
-	if cfg.Gateway.MaxMessages > 0 {
+	if cfg.Memory.MaxMessages > 0 {
+		store.SetMaxMessages(cfg.Memory.MaxMessages)
+	} else {
 		store.SetMaxMessages(cfg.Gateway.MaxMessages)
 	}
+	store.SetMemoryCompaction(cfg.Memory.CompactAfter, cfg.Memory.CompactAfter > 0 && !cfg.Memory.SummarizeOnCompact)
 	if cfg.Gateway.MaxContextMessages > 0 {
 		server.SetDefaultMaxContextMessages(cfg.Gateway.MaxContextMessages)
+	}
+	server.SetMetricsRequireAuth(cfg.Gateway.MetricsRequireAuth)
+	if cfg.Gateway.MetricsRequireAuth && strings.TrimSpace(cfg.Gateway.AuthToken) == "" && strings.TrimSpace(cfg.Gateway.Password) == "" {
+		fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: gateway.metricsRequireAuth is true but authToken and password are empty — /metrics stays open until auth is configured\n")
+	}
+	if err := server.SyncNodesFromConfig(cfg.Nodes); err != nil {
+		fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: config nodes → topology sync: %v\n", err)
 	}
 
 	// RunnerFactory enables per-session model routing.
@@ -856,6 +885,8 @@ func runGateway(cfg config.Config) error {
 			AnthropicModel:   model,
 		})
 	})
+
+	server.SetMemoryCompaction(cfg.Memory)
 
 	// SIGHUP: full config hot-reload — re-applies token, password, origins,
 	// trusted proxies, shutdown timeout, and session message cap.
@@ -872,10 +903,25 @@ func runGateway(cfg config.Config) error {
 			if reloaded.Gateway.ShutdownTimeout > 0 {
 				server.SetShutdownTimeout(time.Duration(reloaded.Gateway.ShutdownTimeout) * time.Second)
 			}
-			if reloaded.Gateway.MaxMessages > 0 {
+			if reloaded.Gateway.MaxContextMessages > 0 {
+				server.SetDefaultMaxContextMessages(reloaded.Gateway.MaxContextMessages)
+			}
+			if reloaded.Memory.MaxMessages > 0 {
+				store.SetMaxMessages(reloaded.Memory.MaxMessages)
+			} else {
 				store.SetMaxMessages(reloaded.Gateway.MaxMessages)
 			}
-			fmt.Printf("[openclaw-go] config reloaded via SIGHUP (token, auth, origins, proxies, timeouts)\n")
+			store.SetMemoryCompaction(reloaded.Memory.CompactAfter, reloaded.Memory.CompactAfter > 0 && !reloaded.Memory.SummarizeOnCompact)
+			server.SetMemoryCompaction(reloaded.Memory)
+			server.SetMetricsRequireAuth(reloaded.Gateway.MetricsRequireAuth)
+			if reloaded.Gateway.MetricsRequireAuth && strings.TrimSpace(reloaded.Gateway.AuthToken) == "" && strings.TrimSpace(reloaded.Gateway.Password) == "" {
+				fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: gateway.metricsRequireAuth is true but authToken and password are empty — /metrics stays open until auth is configured\n")
+			}
+			if err := server.SyncNodesFromConfig(reloaded.Nodes); err != nil {
+				fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: config nodes → topology sync (SIGHUP): %v\n", err)
+			}
+			server.ApplyExtensionTools(reloaded)
+			fmt.Printf("[openclaw-go] config reloaded via SIGHUP (token, auth, origins, proxies, timeouts, metrics auth, nodes, memory, skills/mcp)\n")
 		}
 	}()
 
@@ -917,6 +963,8 @@ func runGateway(cfg config.Config) error {
 		}
 	}
 
+	server.ApplyExtensionTools(cfg)
+
 	if cfg.Channels.Telegram.Enabled {
 		inboundHandler := func(inboundCtx context.Context, inbound channels.InboundMessage) error {
 			_, err := server.HandleInbound(inboundCtx, inbound)
@@ -928,10 +976,18 @@ func runGateway(cfg config.Config) error {
 		}
 		switch mode {
 		case "webhook":
-			server.HandleFunc(
-				cfg.Channels.Telegram.WebhookPath,
-				channels.BuildTelegramWebhookHandler(cfg.Channels.Telegram.WebhookSecret, inboundHandler),
-			)
+			var hook http.HandlerFunc
+			if strings.TrimSpace(cfg.Channels.Telegram.BotToken) != "" {
+				// Use channel handler so answerCallbackQuery runs (inline keyboard UX).
+				tg := channels.NewTelegramChannel(
+					cfg.Channels.Telegram.BotToken,
+					cfg.Channels.Telegram.ChatID,
+				)
+				hook = tg.BuildWebhookHandler(cfg.Channels.Telegram.WebhookSecret, inboundHandler)
+			} else {
+				hook = channels.BuildTelegramWebhookHandler(cfg.Channels.Telegram.WebhookSecret, inboundHandler)
+			}
+			server.HandleFunc(cfg.Channels.Telegram.WebhookPath, hook)
 		default:
 			if strings.TrimSpace(cfg.Channels.Telegram.BotToken) != "" {
 				poller := channels.NewTelegramPoller(cfg.Channels.Telegram.BotToken)
@@ -1127,10 +1183,21 @@ func runConfigure(cfg config.Config, args []string) error {
 	}
 }
 
+func parseBoolArg(s string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true", "1", "yes", "on":
+		return true, nil
+	case "false", "0", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("expected true or false (got %q)", s)
+	}
+}
+
 func runConfigureGateway(cfg config.Config, args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf(
-			"usage: openclaw configure gateway auth-token <token> | allowed-origins <csv>",
+			"usage: openclaw configure gateway auth-token <token> | allowed-origins <csv> | metrics-require-auth <true|false>",
 		)
 	}
 	switch args[0] {
@@ -1169,6 +1236,21 @@ func runConfigureGateway(cfg config.Config, args []string) error {
 			return err
 		}
 		fmt.Printf("gateway allowed origins set (%d entries)\n", len(origins))
+		return nil
+	case "metrics-require-auth":
+		v, err := parseBoolArg(args[1])
+		if err != nil {
+			return err
+		}
+		cfg.Gateway.MetricsRequireAuth = v
+		path, err := config.DefaultPath()
+		if err != nil {
+			return err
+		}
+		if err := config.Save(path, cfg); err != nil {
+			return err
+		}
+		fmt.Printf("gateway.metricsRequireAuth set to %v\n", v)
 		return nil
 	default:
 		return fmt.Errorf("unknown gateway configure command")
@@ -1585,6 +1667,22 @@ func runDoctor(cfg config.Config, baseURL string) error {
 	}
 	defer resp.Body.Close()
 	fmt.Printf("- gateway health: HTTP %d\n", resp.StatusCode)
+	if resp.StatusCode == http.StatusOK {
+		uctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		latest, page, err := gateway.FetchDefaultRepoLatestRelease(uctx)
+		if err != nil {
+			fmt.Printf("- release check: skipped (%v)\n", err)
+		} else {
+			fmt.Printf("- latest published release: %s\n", latest)
+			if page != "" {
+				fmt.Printf("- releases page: %s\n", page)
+			}
+			if gateway.UpdateAvailable(gateway.Version, latest) {
+				fmt.Println("- note: a newer release tag may be available for this repo (compare with your binary build).")
+			}
+		}
+	}
 	return nil
 }
 

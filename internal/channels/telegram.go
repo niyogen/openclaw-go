@@ -50,9 +50,14 @@ func (t *TelegramChannel) Send(ctx context.Context, message OutboundMessage) err
 		return nil
 	}
 
-	payload := map[string]string{
+	payload := map[string]any{
 		"chat_id": targetChatID,
 		"text":    message.Message,
+	}
+	if mid := strings.TrimSpace(message.ReplyToMessageID); mid != "" {
+		if n, err := strconv.ParseInt(mid, 10, 64); err == nil && n > 0 {
+			payload["reply_to_message_id"] = n
+		}
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -258,10 +263,10 @@ type telegramUpdate struct {
 
 // telegramCallbackQuery is fired when a user presses an inline keyboard button.
 type telegramCallbackQuery struct {
-	ID      string           `json:"id"`
-	From    telegramUser     `json:"from"`
+	ID      string            `json:"id"`
+	From    telegramUser      `json:"from"`
 	Message *telegramIncoming `json:"message"`
-	Data    string           `json:"data"` // button payload
+	Data    string            `json:"data"` // button payload
 }
 
 type telegramIncoming struct {
@@ -291,20 +296,22 @@ func messagesFromUpdate(update telegramUpdate) []InboundMessage {
 
 	if update.CallbackQuery != nil {
 		data := strings.TrimSpace(update.CallbackQuery.Data)
-		if data != "" {
-			var chatID string
-			if update.CallbackQuery.Message != nil {
-				chatID = strconv.FormatInt(update.CallbackQuery.Message.Chat.ID, 10)
-			} else {
-				chatID = strconv.FormatInt(update.CallbackQuery.From.ID, 10)
-			}
-			result = append(result, InboundMessage{
-				SessionID: "telegram:" + chatID,
-				Channel:   "telegram",
-				Target:    chatID,
-				Message:   data,
-			})
+		if data == "" {
+			// Inline buttons may omit callback_data; still route so the agent can react.
+			data = "[callback]"
 		}
+		var chatID string
+		if update.CallbackQuery.Message != nil {
+			chatID = strconv.FormatInt(update.CallbackQuery.Message.Chat.ID, 10)
+		} else {
+			chatID = strconv.FormatInt(update.CallbackQuery.From.ID, 10)
+		}
+		result = append(result, InboundMessage{
+			SessionID: "telegram:" + chatID,
+			Channel:   "telegram",
+			Target:    chatID,
+			Message:   data,
+		})
 	}
 
 	return result

@@ -2,11 +2,14 @@
 package topology
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -135,6 +138,62 @@ func (s *Store) UpdateNodeStatus(id string, status NodeStatus) error {
 	return s.save()
 }
 
+// DeriveStableNodeID returns a non-empty id from explicit id, or a deterministic
+// cfg-* id derived from url when id is empty (for openclaw.json "nodes" entries).
+func DeriveStableNodeID(explicitID, url string) string {
+	id := strings.TrimSpace(explicitID)
+	if id != "" {
+		return id
+	}
+	u := strings.TrimSpace(url)
+	if u == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(u))
+	return "cfg-" + hex.EncodeToString(sum[:8])
+}
+
+// UpsertGatewayPeer inserts or updates a federation peer URL (e.g. from config "nodes").
+// Empty url is a no-op. When explicit id is empty, DeriveStableNodeID("", url) is used.
+// The node is marked online and suitable for node.invoke.
+func (s *Store) UpsertGatewayPeer(id, name, url, apiKey string) error {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return nil
+	}
+	id = DeriveStableNodeID(id, url)
+	if id == "" {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = id
+	}
+	apiKey = strings.TrimSpace(apiKey)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if existing, ok := s.nodes[id]; ok {
+		existing.Name = name
+		existing.URL = url
+		existing.APIKey = apiKey
+		existing.Status = NodeStatusOnline
+		existing.LastSeen = &now
+		return s.save()
+	}
+	s.nodes[id] = &Node{
+		ID:        id,
+		Name:      name,
+		URL:       url,
+		APIKey:    apiKey,
+		Status:    NodeStatusOnline,
+		CreatedAt: now,
+		LastSeen:  &now,
+	}
+	return s.save()
+}
+
 // ── Devices ───────────────────────────────────────────────────────────────
 
 func (s *Store) AddDevice(d Device) error {
@@ -245,8 +304,8 @@ func (s *Store) ApprovePairing(id string) error {
 // ── Persistence ───────────────────────────────────────────────────────────
 
 type persistedState struct {
-	Nodes   []*Node          `json:"nodes"`
-	Devices []*Device        `json:"devices"`
+	Nodes   []*Node           `json:"nodes"`
+	Devices []*Device         `json:"devices"`
 	Pairing []*PairingRequest `json:"pairing,omitempty"`
 }
 

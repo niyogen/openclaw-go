@@ -1,4 +1,4 @@
-﻿package gateway
+package gateway
 
 import (
 	"context"
@@ -150,6 +150,8 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	s.maintainSessionMemory(r.Context(), req.SessionID)
+
 	runID := generateRunID()
 	globalRunStore.put(runID, result)
 
@@ -157,6 +159,11 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 		"runId": runID, "sessionId": req.SessionID, "turns": len(result.Turns), "error": errStr,
 	})
 	s.appendLog(logstore.LevelInfo, "agent", "run complete: "+runID, map[string]any{"turns": len(result.Turns)})
+
+	s.agentRunsTotal.Add(1)
+	if errStr != "" {
+		s.agentRunsFailedTotal.Add(1)
+	}
 
 	writeJSON(w, http.StatusOK, agentRunResponse{
 		RunID:     runID,
@@ -296,6 +303,8 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	s.maintainSessionMemory(r.Context(), req.SessionID)
+
 	// Always store the run result so GET /agent/run/{runId} works for both
 	// successful and failed streaming runs.
 	result := runtime.RunResult{FinalText: finalReply}
@@ -312,6 +321,11 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 		"runId": streamRunID, "sessionId": req.SessionID, "turns": turnCount, "error": errStr,
 	})
 	s.appendLog(logstore.LevelInfo, "agent", "stream run complete: "+streamRunID, map[string]any{"turns": turnCount}) //nolint:errcheck
+
+	s.agentRunsTotal.Add(1)
+	if errStr != "" {
+		s.agentRunsFailedTotal.Add(1)
+	}
 }
 
 func (s *Server) handleApprovalsList(w http.ResponseWriter, _ *http.Request) {

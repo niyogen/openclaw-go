@@ -11,16 +11,21 @@ import (
 )
 
 type GatewayConfig struct {
-	Host            string   `json:"host"`
-	Port            int      `json:"port"`
-	AuthToken       string   `json:"authToken"`
-	Password        string   `json:"password"` // HTTP Basic password (alternative to token)
-	AllowedOrigins  []string `json:"allowedOrigins"`
-	PluginsDir      string   `json:"pluginsDir"`
-	TrustedProxies  []string `json:"trustedProxies"`  // IPs/CIDRs that may set X-Forwarded-For
+	Host               string   `json:"host"`
+	Port               int      `json:"port"`
+	AuthToken          string   `json:"authToken"`
+	Password           string   `json:"password"` // HTTP Basic password (alternative to token)
+	AllowedOrigins     []string `json:"allowedOrigins"`
+	PluginsDir         string   `json:"pluginsDir"`
+	TrustedProxies     []string `json:"trustedProxies"`     // IPs/CIDRs that may set X-Forwarded-For
 	ShutdownTimeout    int      `json:"shutdownTimeout"`    // graceful drain in seconds (default 5)
 	MaxMessages        int      `json:"maxMessages"`        // per-session message cap (0 = unlimited)
 	MaxContextMessages int      `json:"maxContextMessages"` // context window truncation (0 = unlimited)
+	// MetricsRequireAuth when true makes GET /metrics use the same auth rules as
+	// other gateway routes (Bearer token, X-OpenClaw-Token, ?token=, Basic password,
+	// or trusted proxy). When false, /metrics is public for scrapers. If no gateway
+	// auth is configured, this flag has no practical effect (requests stay authorized).
+	MetricsRequireAuth bool `json:"metricsRequireAuth"`
 }
 
 type AgentConfig struct {
@@ -227,6 +232,9 @@ func Default() Config {
 }
 
 func DefaultPath() (string, error) {
+	if p := strings.TrimSpace(os.Getenv("OPENCLAW_CONFIG_PATH")); p != "" {
+		return filepath.Clean(p), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err

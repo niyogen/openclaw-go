@@ -31,6 +31,8 @@ type OutboundMessage struct {
 	// ThreadID optionally specifies a thread or reply token for channel-specific threading.
 	// Slack: thread_ts, Teams: replyToId, LINE: replyToken.
 	ThreadID string `json:"threadId,omitempty"`
+	// ReplyToMessageID optionally replies to a prior message (Telegram: reply_to_message_id).
+	ReplyToMessageID string `json:"replyToMessageId,omitempty"`
 	// MediaURL is an optional image/file attachment URL.
 	MediaURL string `json:"mediaUrl,omitempty"`
 	// Buttons are interactive action buttons (Slack Block Kit, Discord components).
