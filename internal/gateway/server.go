@@ -996,6 +996,10 @@ func (s *Server) dispatchRPC(
 		if req.Policy != nil {
 			policy = *req.Policy
 		}
+		// Inherit server-wide context window default when request doesn't specify one.
+		if policy.MaxContextMessages == 0 && s.defaultMaxContextMsgs > 0 {
+			policy.MaxContextMessages = s.defaultMaxContextMsgs
+		}
 		_ = s.store.UpsertSession(req.SessionID, "cli", "")
 		// Snapshot history BEFORE appending user message (same as handleAgentRun).
 		var rpcHistory []agents.HistoryMessage
@@ -1965,17 +1969,22 @@ func (s *Server) dispatchRPC(
 			}
 			return reply, nil
 		})
+		agentPolicy := runtime.ExecPolicy{
+			AllowedTools: profile.AllowedTools,
+			DeniedTools:  profile.DeniedTools,
+			MaxTurns:     profile.MaxTurns,
+		}
+		// Inherit server-wide context window default.
+		if agentPolicy.MaxContextMessages == 0 && s.defaultMaxContextMsgs > 0 {
+			agentPolicy.MaxContextMessages = s.defaultMaxContextMsgs
+		}
 		result := exec.Run(ctx, runtime.RunOptions{
 			SessionID:    p.SessionID,
 			Message:      p.Message,
 			History:      agentHistory,
 			Instructions: profile.Instructions,
-			Policy: runtime.ExecPolicy{
-				AllowedTools: profile.AllowedTools,
-				DeniedTools:  profile.DeniedTools,
-				MaxTurns:     profile.MaxTurns,
-			},
-			Approvals: s.approvals,
+			Policy:       agentPolicy,
+			Approvals:    s.approvals,
 		})
 		errStr := ""
 		if result.Err != nil {

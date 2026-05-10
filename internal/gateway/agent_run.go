@@ -124,7 +124,7 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(instructions) != "" {
 			subHistory = []agents.HistoryMessage{{Role: "system", Content: instructions}}
 		}
-		reply, err := s.runner.GenerateReply(ctx, agents.Turn{Message: message, History: subHistory})
+		reply, err := s.runnerForSession(req.SessionID).GenerateReply(ctx, agents.Turn{Message: message, History: subHistory})
 		if err != nil {
 			return "", err
 		}
