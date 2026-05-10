@@ -155,10 +155,20 @@ func (s *Server) Address() string {
 func (s *Server) Bus() *EventBus { return s.bus }
 
 // SetAuth configures additional auth modes (password, trusted proxies).
-// Must be called before Run().
+// Safe to call after Run() for hot reload via SIGHUP.
 func (s *Server) SetAuth(password string, trustedProxies []string) {
 	s.password = strings.TrimSpace(password)
 	s.trustedProxies = trustedProxies
+}
+
+// SetAuthToken replaces the bearer token. Safe to call after Run().
+func (s *Server) SetAuthToken(token string) {
+	s.authToken = strings.TrimSpace(token)
+}
+
+// SetAllowedOrigins replaces the CORS/WS origin allowlist. Safe to call after Run().
+func (s *Server) SetAllowedOrigins(origins []string) {
+	s.allowedOrigins = normalizeOrigins(origins)
 }
 
 // RegisterExternalPlugin registers an external plugin with the gateway at
@@ -925,13 +935,11 @@ func (s *Server) dispatchRPC(
 		}
 		exec := runtime.NewExecutor(s.runner, toolFn)
 		exec.SetSubagentFn(func(fctx context.Context, message, instructions string) (string, error) {
-			subSessionID := "subagent-" + generateRunID()
-			_ = s.store.UpsertSession(subSessionID, "subagent", "")
-			reply, err := s.runner.GenerateReply(fctx, agents.Turn{Message: message, History: nil})
-			if err != nil {
-				return "", err
+			var subHistory []agents.HistoryMessage
+			if strings.TrimSpace(instructions) != "" {
+				subHistory = []agents.HistoryMessage{{Role: "system", Content: instructions}}
 			}
-			return reply, nil
+			return s.runner.GenerateReply(fctx, agents.Turn{Message: message, History: subHistory})
 		})
 		result := exec.Run(ctx, runtime.RunOptions{
 			SessionID:    req.SessionID,
@@ -1865,9 +1873,11 @@ func (s *Server) dispatchRPC(
 		}
 		exec := runtime.NewExecutor(s.runner, toolFn)
 		exec.SetSubagentFn(func(fctx context.Context, message, instructions string) (string, error) {
-			subSessionID := "subagent-" + generateRunID()
-			_ = s.store.UpsertSession(subSessionID, "subagent", "")
-			reply, err := s.runner.GenerateReply(fctx, agents.Turn{Message: message, History: nil})
+			var subHistory []agents.HistoryMessage
+			if strings.TrimSpace(instructions) != "" {
+				subHistory = []agents.HistoryMessage{{Role: "system", Content: instructions}}
+			}
+			reply, err := s.runner.GenerateReply(fctx, agents.Turn{Message: message, History: subHistory})
 			if err != nil {
 				return "", err
 			}

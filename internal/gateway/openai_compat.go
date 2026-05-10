@@ -429,7 +429,9 @@ func (s *Server) handleV1ChatStream(
 		agents.Stream(ctx, s.runner, turn, out)
 	}()
 
-	var replyRunes int
+	// replyWords accumulates the completion token count using the same
+	// word-split approximation as the blocking path for consistency.
+	var replyWords int
 	for chunk := range out {
 		if chunk.Err != nil {
 			errMsg := map[string]any{
@@ -453,8 +455,8 @@ func (s *Server) handleV1ChatStream(
 				"choices": []any{},
 				"usage": map[string]int{
 					"prompt_tokens":     promptToks,
-					"completion_tokens": replyRunes,
-					"total_tokens":      promptToks + replyRunes,
+					"completion_tokens": replyWords,
+					"total_tokens":      promptToks + replyWords,
 				},
 			}
 			raw, _ := json.Marshal(usageChunk)
@@ -471,7 +473,7 @@ func (s *Server) handleV1ChatStream(
 				continue
 			}
 		}
-		replyRunes += len([]rune(chunk.Delta))
+		replyWords += len(strings.Fields(chunk.Delta))
 		writeDelta(chunk.Delta, nil)
 	}
 	fmt.Fprintf(w, "data: [DONE]\n\n")

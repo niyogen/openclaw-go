@@ -841,7 +841,8 @@ func runGateway(cfg config.Config) error {
 		store.SetMaxMessages(cfg.Gateway.MaxMessages)
 	}
 
-	// SIGHUP: reload config and re-apply auth credentials + shutdown timeout.
+	// SIGHUP: full config hot-reload — re-applies token, password, origins,
+	// trusted proxies, shutdown timeout, and session message cap.
 	go func() {
 		for range sighupCh {
 			reloaded, err := config.Load("")
@@ -849,11 +850,16 @@ func runGateway(cfg config.Config) error {
 				fmt.Fprintf(os.Stderr, "[openclaw-go] SIGHUP config reload failed: %v\n", err)
 				continue
 			}
+			server.SetAuthToken(reloaded.Gateway.AuthToken)
 			server.SetAuth(reloaded.Gateway.Password, reloaded.Gateway.TrustedProxies)
+			server.SetAllowedOrigins(reloaded.Gateway.AllowedOrigins)
 			if reloaded.Gateway.ShutdownTimeout > 0 {
 				server.SetShutdownTimeout(time.Duration(reloaded.Gateway.ShutdownTimeout) * time.Second)
 			}
-			fmt.Printf("[openclaw-go] config reloaded via SIGHUP (auth, proxies, shutdown timeout)\n")
+			if reloaded.Gateway.MaxMessages > 0 {
+				store.SetMaxMessages(reloaded.Gateway.MaxMessages)
+			}
+			fmt.Printf("[openclaw-go] config reloaded via SIGHUP (token, auth, origins, proxies, timeouts)\n")
 		}
 	}()
 

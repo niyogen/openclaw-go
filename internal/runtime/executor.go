@@ -206,14 +206,19 @@ func encodeResult(v any) (string, error) {
 }
 
 // retryingReply calls the runner with up to policy.MaxRetries retries on error.
+// Uses the same 100ms×2^attempt exponential backoff as tool retries.
 func (e *Executor) retryingReply(ctx context.Context, policy ExecPolicy, turn agents.Turn) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt <= policy.MaxRetries; attempt++ {
 		if attempt > 0 {
+			backoff := time.Duration(100<<uint(attempt-1)) * time.Millisecond
+			if backoff > 5*time.Second {
+				backoff = 5 * time.Second
+			}
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
-			case <-time.After(time.Duration(attempt*attempt) * 200 * time.Millisecond):
+			case <-time.After(backoff):
 			}
 		}
 		reply, err := e.runner.GenerateReply(ctx, turn)
