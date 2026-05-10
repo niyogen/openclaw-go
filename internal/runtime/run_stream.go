@@ -68,7 +68,11 @@ func (e *Executor) RunStream(ctx context.Context, opts RunOptions, events chan<-
 		default:
 		}
 
-		turnInput := agents.Turn{History: history}
+		turnHistory := history
+		if policy.MaxContextMessages > 0 {
+			turnHistory = TruncateHistory(history, policy.MaxContextMessages)
+		}
+		turnInput := agents.Turn{History: turnHistory}
 		if pendingUserMessage {
 			turnInput.Message = currentMessage
 		}

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -297,6 +298,173 @@ func TestToolErrorJSONEscaping(t *testing.T) {
 type stringError struct{ s string }
 
 func (e *stringError) Error() string { return e.s }
+
+// ── TruncateHistory tests ─────────────────────────────────────────────────
+
+func TestTruncateHistoryNoOp(t *testing.T) {
+	h := []agents.HistoryMessage{{Role: "user", Content: "a"}, {Role: "assistant", Content: "b"}}
+	out := TruncateHistory(h, 0)
+	if len(out) != 2 {
+		t.Fatalf("expected 2, got %d", len(out))
+	}
+}
+
+func TestTruncateHistoryDropsOldest(t *testing.T) {
+	h := []agents.HistoryMessage{
+		{Role: "user", Content: "1"},
+		{Role: "assistant", Content: "2"},
+		{Role: "user", Content: "3"},
+	}
+	out := TruncateHistory(h, 2)
+	if len(out) != 2 {
+		t.Fatalf("expected 2, got %d", len(out))
+	}
+	if out[0].Content != "2" || out[1].Content != "3" {
+		t.Fatalf("unexpected: %+v", out)
+	}
+}
+
+func TestTruncateHistoryPreservesSystem(t *testing.T) {
+	h := []agents.HistoryMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "1"},
+		{Role: "assistant", Content: "2"},
+		{Role: "user", Content: "3"},
+	}
+	out := TruncateHistory(h, 2)
+	// system always kept + 1 most-recent non-system
+	if len(out) != 2 {
+		t.Fatalf("expected 2, got %d", len(out))
+	}
+	if out[0].Role != "system" {
+		t.Fatalf("first message should be system, got %s", out[0].Role)
+	}
+	if out[1].Content != "3" {
+		t.Fatalf("expected most-recent non-system, got %q", out[1].Content)
+	}
+}
+
+func TestTruncateHistoryEmpty(t *testing.T) {
+	out := TruncateHistory(nil, 5)
+	if out != nil {
+		t.Fatalf("expected nil for empty input, got %v", out)
+	}
+}
+
+// ── RunStream tests ───────────────────────────────────────────────────────
+
+func TestRunStreamSingleTurn(t *testing.T) {
+	runner := &agents.EchoRunner{}
+	exec := NewExecutor(runner, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	events := make(chan RunEvent, 32)
+	go exec.RunStream(ctx, RunOptions{Message: "hello stream", Policy: DefaultPolicy()}, events)
+
+	var types []RunEventType
+	var doneEv RunEvent
+	for ev := range events {
+		types = append(types, ev.Type)
+		if ev.Type == RunEventDone {
+			doneEv = ev
+		}
+	}
+
+	if len(types) == 0 {
+		t.Fatal("no events received")
+	}
+	if types[0] != RunEventStart {
+		t.Fatalf("first event should be start, got %s", types[0])
+	}
+	if doneEv.Type != RunEventDone {
+		t.Fatal("expected RunEventDone")
+	}
+	if doneEv.Turns < 1 {
+		t.Fatal("expected at least 1 turn")
+	}
+	if doneEv.RunID == "" {
+		t.Fatal("expected non-empty runId")
+	}
+}
+
+func TestRunStreamContextTruncation(t *testing.T) {
+	// Verify MaxContextMessages is respected in RunStream.
+	seen := []agents.Turn{}
+	mockRunner := &captureRunner{
+		delegate: &agents.EchoRunner{},
+		capture:  &seen,
+	}
+	exec := NewExecutor(mockRunner, nil)
+
+	longHistory := make([]agents.HistoryMessage, 20)
+	for i := range longHistory {
+		longHistory[i] = agents.HistoryMessage{Role: "user", Content: fmt.Sprintf("msg%d", i)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	policy := DefaultPolicy()
+	policy.MaxContextMessages = 5
+
+	events := make(chan RunEvent, 32)
+	go exec.RunStream(ctx, RunOptions{
+		Message: "new",
+		History: longHistory,
+		Policy:  policy,
+	}, events)
+
+	for range events {
+	}
+
+	if len(seen) == 0 {
+		t.Fatal("no turns captured")
+	}
+	if len(seen[0].History) > 5 {
+		t.Fatalf("history not truncated: got %d messages", len(seen[0].History))
+	}
+}
+
+type captureRunner struct {
+	delegate agents.Runner
+	capture  *[]agents.Turn
+}
+
+func (r *captureRunner) GenerateReply(ctx context.Context, turn agents.Turn) (string, error) {
+	*r.capture = append(*r.capture, turn)
+	return r.delegate.GenerateReply(ctx, turn)
+}
+
+func TestExecutorTruncationInRun(t *testing.T) {
+	seen := []agents.Turn{}
+	mock := &captureRunner{delegate: &agents.EchoRunner{}, capture: &seen}
+	exec := NewExecutor(mock, nil)
+
+	history := make([]agents.HistoryMessage, 10)
+	for i := range history {
+		history[i] = agents.HistoryMessage{Role: "user", Content: fmt.Sprintf("h%d", i)}
+	}
+
+	policy := DefaultPolicy()
+	policy.MaxContextMessages = 3
+
+	result := exec.Run(context.Background(), RunOptions{
+		Message: "go",
+		History: history,
+		Policy:  policy,
+	})
+	if result.Err != nil {
+		t.Fatalf("unexpected error: %v", result.Err)
+	}
+	if len(seen) == 0 {
+		t.Fatal("no turns captured")
+	}
+	if len(seen[0].History) > 3 {
+		t.Fatalf("history should be capped at 3, got %d", len(seen[0].History))
+	}
+}
 
 func TestExecutorToolAllowed(t *testing.T) {
 	runner := &agents.EchoRunner{}
