@@ -18,8 +18,9 @@ type GatewayConfig struct {
 	AllowedOrigins  []string `json:"allowedOrigins"`
 	PluginsDir      string   `json:"pluginsDir"`
 	TrustedProxies  []string `json:"trustedProxies"`  // IPs/CIDRs that may set X-Forwarded-For
-	ShutdownTimeout int      `json:"shutdownTimeout"` // graceful drain in seconds (default 5)
-	MaxMessages     int      `json:"maxMessages"`     // per-session message cap (0 = unlimited)
+	ShutdownTimeout    int      `json:"shutdownTimeout"`    // graceful drain in seconds (default 5)
+	MaxMessages        int      `json:"maxMessages"`        // per-session message cap (0 = unlimited)
+	MaxContextMessages int      `json:"maxContextMessages"` // context window truncation (0 = unlimited)
 }
 
 type AgentConfig struct {

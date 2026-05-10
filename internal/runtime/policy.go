@@ -28,6 +28,11 @@ type ExecPolicy struct {
 	// ToolRetries is how many times a failed tool call is retried with
 	// exponential backoff (100ms * 2^attempt). Zero means no retries.
 	ToolRetries int `json:"toolRetries"`
+
+	// MaxContextMessages caps the history slice passed to the model each turn.
+	// Leading system messages are always kept; oldest non-system messages are
+	// dropped first.  0 means unlimited.
+	MaxContextMessages int `json:"maxContextMessages"`
 }
 
 // DefaultPolicy returns a permissive policy suitable for local/trusted use.
@@ -58,6 +63,9 @@ func (p ExecPolicy) normalize() ExecPolicy {
 	}
 	if p.ToolRetries > maxAllowedToolRetries {
 		p.ToolRetries = maxAllowedToolRetries
+	}
+	if p.MaxContextMessages < 0 {
+		p.MaxContextMessages = 0
 	}
 	return p
 }

@@ -840,6 +840,22 @@ func runGateway(cfg config.Config) error {
 	if cfg.Gateway.MaxMessages > 0 {
 		store.SetMaxMessages(cfg.Gateway.MaxMessages)
 	}
+	if cfg.Gateway.MaxContextMessages > 0 {
+		server.SetDefaultMaxContextMessages(cfg.Gateway.MaxContextMessages)
+	}
+
+	// RunnerFactory enables per-session model routing.
+	server.SetRunnerFactory(func(provider, model string) agents.Runner {
+		return agents.NewRunnerFromOptions(agents.RunnerOptions{
+			Provider:         provider,
+			OpenAIAPIKey:     cfg.Providers.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.Providers.OpenAI.BaseURL,
+			OpenAIModel:      model,
+			AnthropicAPIKey:  cfg.Providers.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Providers.Anthropic.BaseURL,
+			AnthropicModel:   model,
+		})
+	})
 
 	// SIGHUP: full config hot-reload — re-applies token, password, origins,
 	// trusted proxies, shutdown timeout, and session message cap.

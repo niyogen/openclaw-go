@@ -105,7 +105,11 @@ func (e *Executor) Run(ctx context.Context, opts RunOptions) RunResult {
 		default:
 		}
 
-		turnInput := agents.Turn{History: history}
+		turnHistory := history
+		if policy.MaxContextMessages > 0 {
+			turnHistory = TruncateHistory(history, policy.MaxContextMessages)
+		}
+		turnInput := agents.Turn{History: turnHistory}
 		if pendingUserMessage {
 			turnInput.Message = currentMessage
 		}
@@ -188,6 +192,28 @@ func (e *Executor) Run(ctx context.Context, opts RunOptions) RunResult {
 		Turns: allTurns,
 		Err:   &ErrTurnsExceeded{Max: policy.MaxTurns},
 	}
+}
+
+// TruncateHistory trims history to at most maxMessages entries while always
+// preserving leading system messages.  Oldest non-system messages are dropped.
+func TruncateHistory(history []agents.HistoryMessage, maxMessages int) []agents.HistoryMessage {
+	if maxMessages <= 0 || len(history) <= maxMessages {
+		return history
+	}
+	var sys []agents.HistoryMessage
+	rest := history
+	for len(rest) > 0 && rest[0].Role == "system" {
+		sys = append(sys, rest[0])
+		rest = rest[1:]
+	}
+	keep := maxMessages - len(sys)
+	if keep <= 0 {
+		return sys
+	}
+	if len(rest) > keep {
+		rest = rest[len(rest)-keep:]
+	}
+	return append(sys, rest...)
 }
 
 func encodeResult(v any) (string, error) {

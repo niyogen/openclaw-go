@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +61,8 @@ type Session struct {
 	ID        string    `json:"id"`
 	Channel   string    `json:"channel"`
 	Target    string    `json:"target"`
+	Provider  string    `json:"provider,omitempty"` // per-session model provider override
+	Model     string    `json:"model,omitempty"`    // per-session model override
 	Messages  []Message `json:"messages"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -130,6 +133,20 @@ func (s *Store) AppendMessage(sessionID string, msg Message) error {
 		current.Messages = current.Messages[excess:]
 	}
 	current.UpdatedAt = time.Now().UTC()
+	return s.saveLocked()
+}
+
+// SetSessionModel sets the provider and model override for a session.
+func (s *Store) SetSessionModel(id, provider, model string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return errors.New("session not found")
+	}
+	sess.Provider = strings.TrimSpace(provider)
+	sess.Model = strings.TrimSpace(model)
+	sess.UpdatedAt = time.Now().UTC()
 	return s.saveLocked()
 }
 

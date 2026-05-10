@@ -108,10 +108,15 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().UTC(),
 	})
 
+	// Inherit server-wide context window default when request doesn't specify one.
+	if policy.MaxContextMessages == 0 && s.defaultMaxContextMsgs > 0 {
+		policy.MaxContextMessages = s.defaultMaxContextMsgs
+	}
+
 	toolFn := func(ctx context.Context, name string, args map[string]any) (any, error) {
 		return s.tools.Invoke(ctx, ToolInvokeRequest{Name: name, Arguments: args})
 	}
-	exec := runtime.NewExecutor(s.runner, toolFn)
+	exec := runtime.NewExecutor(s.runnerForSession(req.SessionID), toolFn)
 	exec.SetSubagentFn(func(ctx context.Context, message, instructions string) (string, error) {
 		// Run the sub-agent with its own isolated turn (no shared session history).
 		// Pass instructions as a system message so the sub-agent has the right context.

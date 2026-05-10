@@ -53,9 +53,13 @@ type Server struct {
 	shutdownFn      func()
 	topo            *topology.Store
 	workspace       *agents.Workspace
-	mux             *http.ServeMux
-	startedAt       time.Time
-	shutdownTimeout time.Duration
+	mux                    *http.ServeMux
+	startedAt              time.Time
+	shutdownTimeout        time.Duration
+	defaultMaxContextMsgs  int
+	runnerFactory          func(provider, model string) agents.Runner
+	runnerCache            map[string]agents.Runner
+	runnerCacheMu          sync.Mutex
 }
 
 func New(
@@ -132,6 +136,7 @@ func New(
 		s.secrets, _ = secretstore.New(tmp)
 	}
 	s.shutdownTimeout = 5 * time.Second
+	s.runnerCache = map[string]agents.Runner{}
 	s.initTools()
 	s.registerRoutes()
 	s.registerOpenAICompatRoutes()
@@ -145,6 +150,41 @@ func (s *Server) SetShutdownTimeout(d time.Duration) {
 	if d > 0 {
 		s.shutdownTimeout = d
 	}
+}
+
+// SetDefaultMaxContextMessages sets the server-wide default for history
+// truncation. Per-request policy.MaxContextMessages overrides this.
+func (s *Server) SetDefaultMaxContextMessages(n int) {
+	if n >= 0 {
+		s.defaultMaxContextMsgs = n
+	}
+}
+
+// SetRunnerFactory installs a factory used to create per-session runners when
+// a session has a specific provider/model override set.
+func (s *Server) SetRunnerFactory(fn func(provider, model string) agents.Runner) {
+	s.runnerFactory = fn
+}
+
+// runnerForSession returns a session-specific Runner when the session has a
+// provider/model override, otherwise returns the global s.runner.
+func (s *Server) runnerForSession(sessionID string) agents.Runner {
+	if s.runnerFactory == nil {
+		return s.runner
+	}
+	sess, ok := s.store.Get(sessionID)
+	if !ok || (sess.Provider == "" && sess.Model == "") {
+		return s.runner
+	}
+	key := sess.Provider + ":" + sess.Model
+	s.runnerCacheMu.Lock()
+	defer s.runnerCacheMu.Unlock()
+	if r, exists := s.runnerCache[key]; exists {
+		return r
+	}
+	r := s.runnerFactory(sess.Provider, sess.Model)
+	s.runnerCache[key] = r
+	return r
 }
 
 func (s *Server) Address() string {
@@ -288,6 +328,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /sessions/{id}/kill", cors(s.withAuth(s.handleSessionKill)))
 	s.mux.Handle("POST /sessions/{id}/compact", cors(s.withAuth(s.handleSessionCompact)))
 	s.mux.Handle("GET /sessions/{id}/stats", cors(s.withAuth(s.handleSessionStats)))
+	s.mux.Handle("POST /sessions/{id}/model", cors(s.withAuth(withBodyLimit(s.handleSessionSetModel))))
 	s.mux.Handle("GET /agent/run/{runId}", cors(s.withAuth(s.handleAgentRunGet)))
 	s.mux.HandleFunc("/message", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleMessage)))))
 	s.mux.Handle("POST /agent/run", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleAgentRun)))))
@@ -479,6 +520,35 @@ func (s *Server) handleSessionStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleSessionSetModel sets a per-session model/provider override.
+// Body: {"provider":"openai","model":"gpt-4o"}
+func (s *Server) handleSessionSetModel(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session id is required"})
+		return
+	}
+	var req struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if err := s.store.SetSessionModel(id, req.Provider, req.Model); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// Evict cached runner so next request gets a fresh one with new model.
+	s.runnerCacheMu.Lock()
+	delete(s.runnerCache, req.Provider+":"+req.Model)
+	s.runnerCacheMu.Unlock()
+	_ = s.logs.Append(logstore.LevelInfo, "sessions", "session model set: "+id, //nolint:errcheck
+		map[string]any{"provider": req.Provider, "model": req.Model})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sessionId": id, "provider": req.Provider, "model": req.Model})
 }
 
 func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
@@ -675,7 +745,11 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 		SessionID: req.SessionID,
 		Data:      map[string]any{"role": "user", "content": req.Message},
 	})
-	reply, err := s.runner.GenerateReply(ctx, agents.Turn{
+	// Truncate history if a context window limit is configured.
+	if s.defaultMaxContextMsgs > 0 {
+		historyMessages = runtime.TruncateHistory(historyMessages, s.defaultMaxContextMsgs)
+	}
+	reply, err := s.runnerForSession(req.SessionID).GenerateReply(ctx, agents.Turn{
 		Message: req.Message,
 		History: historyMessages,
 	})
@@ -2108,6 +2182,25 @@ func (s *Server) dispatchRPC(
 			return nil, &rpcError{Code: -32000, Message: err.Error()}
 		}
 		return map[string]any{"ok": true, "sessionId": p.SessionID}, nil
+	case "sessions.setModel":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Provider  string `json:"provider"`
+			Model     string `json:"model"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
+		if err := s.store.SetSessionModel(p.SessionID, p.Provider, p.Model); err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		s.runnerCacheMu.Lock()
+		delete(s.runnerCache, p.Provider+":"+p.Model)
+		s.runnerCacheMu.Unlock()
+		return map[string]any{"ok": true, "sessionId": p.SessionID, "provider": p.Provider, "model": p.Model}, nil
 	case "sessions.preview":
 		var p struct {
 			SessionID string `json:"sessionId"`
