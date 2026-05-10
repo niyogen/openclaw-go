@@ -78,8 +78,11 @@ func BuildTeamsWebhookHandler(
 				return
 			}
 		}
-		body, err := io.ReadAll(r.Body)
+		body, err := readWebhookBody(w, r)
 		if err != nil {
+			if errBodyTooLarge(err) {
+				return
+			}
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}

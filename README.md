@@ -80,11 +80,11 @@ Implemented MVP:
   - telegram inbound long-polling (`getUpdates`) mode
   - telegram inbound webhook mode with optional secret-token verification (webhook POST bodies capped at 4 MiB)
   - slack outbound adapter via `chat.postMessage`
-  - slack inbound Events API webhook mode with optional signature verification
+  - slack inbound Events API webhook mode with optional signature verification (webhook POST bodies capped at 4 MiB)
   - discord outbound adapter via channel messages API
-  - discord inbound webhook bridge mode with optional token header
+  - discord inbound webhook bridge mode with optional token header (webhook POST bodies capped at 4 MiB)
   - teams outbound adapter via incoming webhook URL
-  - teams inbound webhook bridge mode with optional token header
+  - teams inbound webhook bridge mode with optional token header (webhook POST bodies capped at 4 MiB)
   - whatsapp outbound adapter via Cloud API (`/{phone_number_id}/messages`)
   - whatsapp inbound webhook mode (GET verify + POST events, optional app-secret signature check); when **`channels.whatsapp.enabled`** is `true`, **`WHATSAPP_VERIFY_TOKEN`** / **`channels.whatsapp.verifyToken`** is **required** (gateway refuses to start otherwise). Webhook POST bodies are capped at 4 MiB (same order as other JSON routes).
 
@@ -133,7 +133,7 @@ Before exposing the gateway on a network:
 - Back up **`~/.openclaw-go/`** (sessions, secrets, cron, hooks, topology) or your **`OPENCLAW_CONFIG_PATH`** directory on a schedule.
 - Run **`go test ./...`** (and optionally **`go test -tags=integration ./...`**) before releases; use **`make e2e`** or **`./scripts/smoke.sh`** against a running instance for a quick sanity check.
 
-See [docs/PARITY.md](docs/PARITY.md) if you track feature parity against a pinned upstream OpenClaw revision.
+See [docs/PARITY.md](docs/PARITY.md) for a pinned parity checklist vs upstream OpenClaw, and **[docs/OPERATOR_QUICKSTART.md](docs/OPERATOR_QUICKSTART.md)** for HTTP + Telegram + WhatsApp setup.
 
 ## Build & Run
 
