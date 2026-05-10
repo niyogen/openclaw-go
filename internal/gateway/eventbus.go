@@ -73,7 +73,8 @@ func NewEventBus() *EventBus {
 
 // Subscribe registers a channel to receive events.
 // Pass sessionID="" to receive all events; otherwise only that session's events.
-// Returns an unsubscribe function.
+// Returns the event channel and an unsubscribe function.
+// The channel is closed when unsubscribe is called, so range loops terminate.
 func (b *EventBus) Subscribe(sessionID string) (<-chan GatewayEvent, func()) {
 	ch := make(chan GatewayEvent, 32)
 	b.mu.Lock()
@@ -81,14 +82,17 @@ func (b *EventBus) Subscribe(sessionID string) (<-chan GatewayEvent, func()) {
 	id := b.seq
 	b.subs[id] = &subscriber{ch: ch, sessionID: sessionID}
 	b.mu.Unlock()
+
+	var once sync.Once
 	return ch, func() {
-		b.mu.Lock()
-		delete(b.subs, id)
-		b.mu.Unlock()
-		// Drain so sender goroutines don't block.
-		for len(ch) > 0 {
-			<-ch
-		}
+		once.Do(func() {
+			b.mu.Lock()
+			delete(b.subs, id)
+			b.mu.Unlock()
+			// Closing the channel signals any range-based consumer to exit,
+			// preventing goroutine leaks across tests.
+			close(ch)
+		})
 	}
 }
 

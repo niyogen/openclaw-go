@@ -2011,7 +2011,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := conn.ReadJSON(&frame); err != nil {
 				return
 			}
-			s.dispatchWSFrame(r.Context(), frame, send)
+			s.dispatchWSFrame(r.Context(), frame, send, done)
 		}
 	}()
 
@@ -2029,7 +2029,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 // dispatchWSFrame routes an inbound WS frame to the appropriate handler.
-func (s *Server) dispatchWSFrame(ctx context.Context, frame wsFrame, send chan<- wsFrame) {
+func (s *Server) dispatchWSFrame(ctx context.Context, frame wsFrame, send chan<- wsFrame, done <-chan struct{}) {
 	replyErr := func(id, msg string) {
 		send <- wsFrame{Type: "error", ID: id, Error: msg}
 	}
@@ -2085,13 +2085,25 @@ func (s *Server) dispatchWSFrame(ctx context.Context, frame wsFrame, send chan<-
 		// Subscribe to events for a specific session (or all if sessionId is empty).
 		sessionFilter := strings.TrimSpace(frame.SessionID)
 		evCh, unsub := s.bus.Subscribe(sessionFilter)
+		// Forward events to the WS send channel until the connection closes
+		// (done is closed) or the subscription is cancelled.
 		go func() {
-			defer unsub()
-			for ev := range evCh {
-				now := time.Now().UTC()
+			defer unsub() // closes evCh → terminates the for-range below
+			for {
 				select {
-				case send <- wsFrame{Type: "event", ID: frame.ID, Data: ev, Time: &now}:
-				default:
+				case <-done:
+					return
+				case ev, ok := <-evCh:
+					if !ok {
+						return // channel closed
+					}
+					now := time.Now().UTC()
+					select {
+					case send <- wsFrame{Type: "event", ID: frame.ID, Data: ev, Time: &now}:
+					case <-done:
+						return
+					default:
+					}
 				}
 			}
 		}()
