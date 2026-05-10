@@ -239,9 +239,15 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 		return reply, nil
 	})
 
+	// Pre-generate runID so it is available even if the stream fails/is cancelled.
+	streamRunID := generateRunID()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
+	// Expose the runId in a response header so the client can retrieve the
+	// run result via GET /agent/run/{runId} even if the stream is interrupted.
+	w.Header().Set("X-Run-Id", streamRunID)
 	w.WriteHeader(http.StatusOK)
 
 	writeSSE := func(ev runtime.RunEvent) {
@@ -264,7 +270,6 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 
 	var finalReply string
 	var turnCount int
-	var runID string
 	var errStr string
 
 	for ev := range events {
@@ -273,7 +278,7 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 		case runtime.RunEventDone:
 			finalReply = ev.Reply
 			turnCount = ev.Turns
-			runID = ev.RunID
+			// RunStream generates its own internal runID; we use our gateway runID.
 		case runtime.RunEventError:
 			errStr = ev.Error
 		}
@@ -291,25 +296,22 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if runID != "" {
-		// Build a RunResult that mirrors what the blocking path stores so that
-		// GET /agent/run/{runId} can report errors and turn counts correctly.
-		result := runtime.RunResult{FinalText: finalReply}
-		if errStr != "" {
-			result.Err = fmt.Errorf("%s", errStr)
-			result.FinalText = ""
-		}
-		// Populate Turns with placeholder records to preserve turn count.
-		for i := 0; i < turnCount; i++ {
-			result.Turns = append(result.Turns, runtime.TurnResult{Turn: i + 1})
-		}
-		globalRunStore.put(runID, result)
+	// Always store the run result so GET /agent/run/{runId} works for both
+	// successful and failed streaming runs.
+	result := runtime.RunResult{FinalText: finalReply}
+	if errStr != "" {
+		result.Err = fmt.Errorf("%s", errStr)
+		result.FinalText = ""
 	}
+	for i := 0; i < turnCount; i++ {
+		result.Turns = append(result.Turns, runtime.TurnResult{Turn: i + 1})
+	}
+	globalRunStore.put(streamRunID, result)
 
 	s.hooks.Emit(hookstore.EventAgentRunComplete, map[string]any{
-		"runId": runID, "sessionId": req.SessionID, "turns": turnCount, "error": errStr,
+		"runId": streamRunID, "sessionId": req.SessionID, "turns": turnCount, "error": errStr,
 	})
-	s.logs.Append(logstore.LevelInfo, "agent", "stream run complete: "+runID, map[string]any{"turns": turnCount})
+	s.logs.Append(logstore.LevelInfo, "agent", "stream run complete: "+streamRunID, map[string]any{"turns": turnCount}) //nolint:errcheck
 }
 
 func (s *Server) handleApprovalsList(w http.ResponseWriter, _ *http.Request) {

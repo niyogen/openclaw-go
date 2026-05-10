@@ -1681,10 +1681,11 @@ func (s *Server) dispatchRPC(
 			SessionID string `json:"sessionId"`
 			Limit     int    `json:"limit"`
 		}
-		if len(params) > 0 {
-			if err := json.Unmarshal(params, &p); err != nil {
-				return nil, &rpcError{Code: -32602, Message: "invalid params"}
-			}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
 		}
 		if p.Limit <= 0 {
 			p.Limit = 50
