@@ -68,6 +68,9 @@ func (r *OpenAIRunner) GenerateReply(ctx context.Context, turn Turn) (string, er
 	}
 
 	messages := buildMessages(turn)
+	if len(messages) == 0 {
+		return "", fmt.Errorf("openai: cannot send request with no messages")
+	}
 	reqBody := openAIChatRequest{
 		Model:    r.model,
 		Messages: messages,

@@ -87,8 +87,16 @@ func New(path string) (*Store, error) {
 func (s *Store) UpsertSession(id, channel, target string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.sessions[id]
-	if !ok {
+	if existing, ok := s.sessions[id]; ok {
+		// Update routing metadata so that channel switches (e.g. Telegram → CLI)
+		// are reflected in subsequent lookups.
+		if channel != "" {
+			existing.Channel = channel
+		}
+		if target != "" {
+			existing.Target = target
+		}
+	} else {
 		s.sessions[id] = &Session{
 			ID:        id,
 			Channel:   channel,

@@ -217,6 +217,18 @@ func (s *Store) ListPendingPairing() []PairingRequest {
 	return out
 }
 
+// RejectPairing marks a pairing request as rejected and persists the change.
+func (s *Store) RejectPairing(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.pairing[id]
+	if !ok {
+		return errors.New("pairing request not found")
+	}
+	p.Status = "rejected"
+	return s.save()
+}
+
 func (s *Store) ApprovePairing(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -410,6 +410,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.bus.Publish(GatewayEvent{Type: EventSessionDeleted, SessionID: id})
+	s.logs.Append(logstore.LevelInfo, "sessions", "session deleted: "+id, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id})
 }
 
@@ -1350,9 +1351,11 @@ func (s *Server) dispatchRPC(
 
 	// ── models auth status ────────────────────────────────────────────────
 	case "models.authStatus":
+		_, isOpenAI := s.runner.(*agents.OpenAIRunner)
+		_, isAnthropic := s.runner.(*agents.AnthropicRunner)
 		return map[string]any{
-			"openai":    s.runner != nil,
-			"anthropic": s.runner != nil,
+			"openai":    isOpenAI,
+			"anthropic": isAnthropic,
 		}, nil
 
 	// ── plugins UI descriptors ────────────────────────────────────────────
@@ -1439,16 +1442,25 @@ func (s *Server) dispatchRPC(
 		return map[string]any{"history": msgs, "sessionId": p.SessionID}, nil
 	case "chat.abort":
 		var p sessionIDParams
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
 		}
 		_ = s.store.Abort(p.SessionID, "user aborted")
 		return map[string]any{"ok": true}, nil
 	case "chat.send":
 		// Alias for message.send in chat context.
 		var req messageRequest
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &req)
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if strings.TrimSpace(req.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
 		}
 		if req.Channel == "" {
 			req.Channel = "chat"
@@ -1586,8 +1598,14 @@ func (s *Server) dispatchRPC(
 		var p struct {
 			PairingID string `json:"pairingId"`
 		}
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &p)
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.PairingID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "pairingId is required"}
+		}
+		if err := s.topo.RejectPairing(p.PairingID); err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
 		}
 		return map[string]any{"ok": true, "rejected": p.PairingID}, nil
 	case "device.pair.list", "device.pending.list":
@@ -1679,11 +1697,34 @@ func (s *Server) dispatchRPC(
 		if len(params) == 0 {
 			return nil, &rpcError{Code: -32602, Message: "invalid params"}
 		}
-		_ = json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
+		if strings.TrimSpace(p.Message) == "" {
+			return nil, &rpcError{Code: -32602, Message: "message is required"}
+		}
 		profile, ok := s.workspace.Get(p.AgentID)
 		if !ok {
 			return nil, &rpcError{Code: -32001, Message: "agent not found: " + p.AgentID}
 		}
+		_ = s.store.UpsertSession(p.SessionID, "cli", "")
+		var agentHistory []agents.HistoryMessage
+		if sess, ok2 := s.store.Get(p.SessionID); ok2 {
+			for _, m := range sess.Messages {
+				agentHistory = append(agentHistory, agents.HistoryMessage{
+					Role:    string(m.Role),
+					Content: m.Content,
+				})
+			}
+		}
+		_ = s.store.AppendMessage(p.SessionID, sessions.Message{
+			Role:      sessions.RoleUser,
+			Content:   p.Message,
+			CreatedAt: time.Now().UTC(),
+		})
 		toolFn := func(fctx context.Context, name string, args map[string]any) (any, error) {
 			return s.tools.Invoke(fctx, ToolInvokeRequest{Name: name, Arguments: args})
 		}
@@ -1691,6 +1732,7 @@ func (s *Server) dispatchRPC(
 		result := exec.Run(ctx, runtime.RunOptions{
 			SessionID:    p.SessionID,
 			Message:      p.Message,
+			History:      agentHistory,
 			Instructions: profile.Instructions,
 			Policy: runtime.ExecPolicy{
 				AllowedTools: profile.AllowedTools,
@@ -1702,6 +1744,12 @@ func (s *Server) dispatchRPC(
 		errStr := ""
 		if result.Err != nil {
 			errStr = result.Err.Error()
+		} else if result.FinalText != "" {
+			_ = s.store.AppendMessage(p.SessionID, sessions.Message{
+				Role:      sessions.RoleAssistant,
+				Content:   result.FinalText,
+				CreatedAt: time.Now().UTC(),
+			})
 		}
 		return map[string]any{
 			"agentId":   p.AgentID,
@@ -2031,7 +2079,7 @@ func (s *Server) dispatchRPC(
 		return map[string]any{"ok": true}, nil
 	// ── sessions.all / sessions.count ────────────────────────────────────
 	case "sessions.count":
-		return map[string]any{"count": len(s.store.List())}, nil
+		return map[string]any{"count": s.store.Count()}, nil
 
 	// ── approvals.get ────────────────────────────────────────────────────
 	case "approvals.get":
@@ -2079,6 +2127,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(maxBodyBytes) // reuse the same 4 MiB cap as HTTP bodies
 
 	// Send a welcome/connected frame on connect.
 	now := time.Now().UTC()
