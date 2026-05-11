@@ -58,6 +58,7 @@
     </div>
     <div class="card">
       <h2>Quick infer</h2>
+      <div class="sub" id="infer-agent" style="margin-bottom:0.5rem">agent: …</div>
       <input id="infer-input" type="text" placeholder="Ask something…" style="width:100%;padding:0.5rem;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:0.375rem;font-size:0.875rem" />
       <button onclick="doInfer()">Send</button>
       <pre id="infer-output" style="margin-top:0.5rem"></pre>
@@ -73,7 +74,19 @@ async function rpc(method, params={}) {
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({jsonrpc:'2.0',id:1,method,params})
   });
-  const j = await r.json();
+  let j;
+  try {
+    j = await r.json();
+  } catch (e) {
+    throw new Error('invalid JSON from /rpc (HTTP ' + r.status + ')');
+  }
+  if (!r.ok) {
+    throw new Error('HTTP ' + r.status + ': ' + (j && j.error ? j.error.message : JSON.stringify(j)));
+  }
+  if (j && j.error) {
+    const m = j.error.message || JSON.stringify(j.error);
+    throw new Error(m);
+  }
   return j.result;
 }
 
@@ -85,7 +98,16 @@ async function refresh() {
     document.getElementById('gw-status').textContent = health.status || 'live';
 
     const gwStatus = await rpc('gateway.status');
-    if (gwStatus) document.getElementById('gw-address').textContent = gwStatus.address || '';
+    if (gwStatus) {
+      document.getElementById('gw-address').textContent = gwStatus.address || '';
+      const ag = gwStatus.agent;
+      if (ag && typeof ag === 'object') {
+        const warn = (ag.provider === 'openai' && !ag.openaiApiKeyConfigured) ? ' — no OpenAI key (will echo)' : '';
+        document.getElementById('infer-agent').textContent =
+          'agent: ' + (ag.provider || '—') + ' / ' + (ag.model || '—') +
+          (ag.openaiApiKeyConfigured ? ' (OpenAI key set)' : '') + warn;
+      }
+    }
 
     const usage = await rpc('usage.stats');
     if (usage) {
@@ -111,7 +133,19 @@ async function doInfer() {
   document.getElementById('infer-output').textContent = '…';
   try {
     const r = await rpc('message.send', {sessionId:'ui-infer', message: msg, channel:'ui'});
-    document.getElementById('infer-output').textContent = r?.reply || '(no reply)';
+    if (r == null || typeof r !== 'object') {
+      document.getElementById('infer-output').textContent = '(unexpected RPC result)';
+      return;
+    }
+    if (!Object.prototype.hasOwnProperty.call(r, 'reply')) {
+      document.getElementById('infer-output').textContent = '(no reply field in result)';
+      return;
+    }
+    if (r.reply === '') {
+      document.getElementById('infer-output').textContent = '(empty reply from model)';
+      return;
+    }
+    document.getElementById('infer-output').textContent = String(r.reply);
   } catch(e) {
     document.getElementById('infer-output').textContent = 'Error: ' + e.message;
   }

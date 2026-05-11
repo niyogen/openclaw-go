@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,6 +37,68 @@ func TestValidateGatewayChannelConfig_WhatsAppVerifyToken(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestConfigureSetAgentProviderSyncsModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "openclaw.json")
+	t.Setenv("OPENCLAW_CONFIG_PATH", path)
+
+	cfg := config.Default()
+	cfg.Agent.Provider = "echo"
+	cfg.Agent.Model = "echo"
+	cfg.Providers.OpenAI.Model = "gpt-4o"
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runConfigure(loaded, []string{"set-agent-provider", "openai"}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Agent.Provider != "openai" {
+		t.Fatalf("provider %q", after.Agent.Provider)
+	}
+	if after.Agent.Model != "gpt-4o" {
+		t.Fatalf("model %q want gpt-4o", after.Agent.Model)
+	}
+
+	if err := runConfigure(after, []string{"set-agent-provider", "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	afterEcho, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterEcho.Agent.Model != "echo" {
+		t.Fatalf("echo model %q", afterEcho.Agent.Model)
+	}
+
+	cfg2 := config.Default()
+	cfg2.Providers.Anthropic.Model = "claude-test-model"
+	if err := config.Save(path, cfg2); err != nil {
+		t.Fatal(err)
+	}
+	loaded2, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runConfigure(loaded2, []string{"set-agent-provider", "anthropic"}); err != nil {
+		t.Fatal(err)
+	}
+	afterAnthropic, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterAnthropic.Agent.Model != "claude-test-model" {
+		t.Fatalf("anthropic model %q", afterAnthropic.Agent.Model)
+	}
 }
 
 func TestParseBoolArg(t *testing.T) {

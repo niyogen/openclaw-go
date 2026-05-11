@@ -41,6 +41,7 @@ Implemented MVP:
 - `openclaw configure whatsapp webhook-path <path>`
 - `openclaw doctor` for quick local health/config checks
 - `openclaw gateway` / `openclaw gateway run` starts an HTTP gateway server
+- **`GET /ui/`** — embedded **control panel** (health, gateway status, session/cron/hook counts, log preview, quick infer via JSON-RPC `message.send`); **`GET /`** redirects to **`/ui/`** (UI routes use the same gateway auth as `/rpc` when a token or password is configured — the static page does not inject **`Authorization`** headers, so for locked-down gateways use the CLI or curl with a Bearer token)
 - `GET /health` for status checks (includes `version`)
 - `GET /metrics` — Prometheus text metrics (uptime, heap, goroutines, RPC / channel inbound / agent run / dispatch-error counters); **public by default** so scrapers do not need a token
 - `GET /logs` — event log (filterable by `level`, `component`)
@@ -106,6 +107,8 @@ Environment helpers:
 - `OPENCLAW_GATEWAY_AUTH_TOKEN`
 - `OPENCLAW_GATEWAY_ALLOWED_ORIGINS` (comma-separated)
 - `OPENCLAW_CONFIG_PATH` (path to `openclaw.json`; overrides `~/.openclaw-go/openclaw.json` for tests and multiple profiles)
+- `OPENCLAW_DATA_DIR` (directory for `sessions.json`, topology/logs/cron/hooks/secrets stores, and default `plugins/` when `gateway.pluginsDir` is unset; Docker image defaults to `/data`)
+- `OPENCLAW_GATEWAY_HOST` (bind address — use **`0.0.0.0`** in containers so published ports work)
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 - `TELEGRAM_WEBHOOK_SECRET`
@@ -135,6 +138,153 @@ Before exposing the gateway on a network:
 
 See [docs/PARITY.md](docs/PARITY.md) for a pinned parity checklist vs upstream OpenClaw, and **[docs/OPERATOR_QUICKSTART.md](docs/OPERATOR_QUICKSTART.md)** for HTTP + Telegram + WhatsApp setup.
 
+## Run and test capabilities
+
+Use this flow to **run the gateway locally** and **prove each layer** (health → model → sessions → tools/agent → observability → automated tests).
+
+### Prerequisites
+
+- **Go** toolchain matching [`go.mod`](go.mod) (currently **1.22+**).
+- **First-time config** (writes `~/.openclaw-go/openclaw.json` unless `OPENCLAW_CONFIG_PATH` is set):
+
+  ```bash
+  go run ./cmd/openclaw config init
+  ```
+
+- **Provider** — for tests without API keys, use the built-in echo runner:
+
+  ```bash
+  go run ./cmd/openclaw configure set-agent-provider echo
+  ```
+
+  For real inference, switch to `openai` or `anthropic` / `claude` and set **`OPENAI_API_KEY`** / **`ANTHROPIC_API_KEY`** (or embed keys in config — prefer env vars).
+
+### 1. Start the gateway
+
+Terminal **A**:
+
+```bash
+go run ./cmd/openclaw gateway
+```
+
+Default URL is **`http://127.0.0.1:18789`** (from `gateway.host` / `gateway.port` in config). If you set **`gateway.authToken`**, every protected request below needs **`Authorization: Bearer <token>`**, **`X-OpenClaw-Token`**, **`?token=`**, or HTTP Basic as documented for your setup.
+
+### 2. Sanity checks (terminal B)
+
+```bash
+curl -s http://127.0.0.1:18789/health
+go run ./cmd/openclaw doctor
+go run ./cmd/openclaw rpc health
+go run ./cmd/openclaw status
+```
+
+### 3. Model inference (CLI)
+
+Single-turn call through the configured runner:
+
+```bash
+go run ./cmd/openclaw infer "What is 2+2?"
+```
+
+Higher-level exercise that talks to the gateway’s agent path (still useful with **`echo`**):
+
+```bash
+go run ./cmd/openclaw agent "Reply with one short greeting."
+```
+
+### 4. Sessions and `/message`
+
+```bash
+go run ./cmd/openclaw message send demo-session "Hello from CLI"
+go run ./cmd/openclaw sessions
+go run ./cmd/openclaw session get demo-session
+```
+
+Raw HTTP equivalent:
+
+```bash
+curl -s -X POST http://127.0.0.1:18789/message \
+  -H "Content-Type: application/json" \
+  -d '{"sessionId":"demo-http","channel":"cli","message":"Hello via curl"}'
+```
+
+### 5. Tools and agent loop (`/agent/run`)
+
+List tools:
+
+```bash
+curl -s http://127.0.0.1:18789/tools
+go run ./cmd/openclaw rpc tools.list
+```
+
+Blocking agent run (tools + policy — behavior depends on provider and registered tools):
+
+```bash
+curl -s -X POST http://127.0.0.1:18789/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{"sessionId":"agent-demo","message":"Say hello in one sentence."}'
+```
+
+Streaming variant: **`POST /agent/run/stream`** (SSE). With auth, add the same headers you use for `/message`.
+
+### 6. Observability
+
+```bash
+curl -s http://127.0.0.1:18789/metrics | head -50
+curl -s "http://127.0.0.1:18789/logs?level=info"
+```
+
+Live log tail (**Server-Sent Events**):
+
+```bash
+curl -N "http://127.0.0.1:18789/logs/stream?level=info"
+```
+
+Responses include **`X-Request-ID`** for correlation with log lines.
+
+### 7. Automated tests (from clone root)
+
+```bash
+go test ./... -count=1 -timeout 120s
+```
+
+**Race detector** (matches Linux/macOS CI — requires cgo there):
+
+```bash
+go test -p 1 -count=1 -timeout 120s -race ./...
+```
+
+**Integration tag** (extra tests; CI runs this on **Linux + Go 1.24**):
+
+```bash
+go test -tags=integration -p 1 -count=1 -timeout 120s ./...
+```
+
+**End-to-end** package (starts gateway in-process):
+
+```bash
+go test ./e2e/... -count=1 -timeout 90s -v
+# or: make e2e   # builds dist/openclaw then runs the same package (see Makefile)
+```
+
+### 8. Smoke script (gateway already running)
+
+[`scripts/smoke.sh`](scripts/smoke.sh) hits **`/health`** and **`/rpc`** with `curl`:
+
+```bash
+bash scripts/smoke.sh
+# optional:
+OPENCLAW_BASE_URL=http://127.0.0.1:18789 OPENCLAW_TOKEN=your-token bash scripts/smoke.sh
+```
+
+On **Windows**, use **Git Bash**, **WSL**, or run the same `curl` commands manually. For an in-repo scripted check without Bash, **`make e2e-ps`** runs [`scripts/e2e.ps1`](scripts/e2e.ps1) (requires PowerShell).
+
+### 9. Channels (Telegram, WhatsApp, HTTP bridging)
+
+Step-by-step env vars, webhooks, and safety notes: **[docs/OPERATOR_QUICKSTART.md](docs/OPERATOR_QUICKSTART.md)**.
+
+---
+
 ## Build & Run
 
 ### Quick start (local)
@@ -160,7 +310,7 @@ make release        # Linux/macOS/Windows × amd64/arm64 → dist/release/
 
 ```bash
 make docker-build   # builds openclaw-go:latest
-make docker-run     # runs gateway, mounts ~/.openclaw-go as /data
+make docker-run     # bind-mount ~/.openclaw-go → /data, OPENCLAW_DATA_DIR + listen 0.0.0.0
 ```
 
 Or directly:
@@ -169,38 +319,50 @@ Or directly:
 docker build -t openclaw-go .
 docker run --rm -p 18789:18789 \
   -v "$HOME/.openclaw-go:/data" \
+  -e OPENCLAW_DATA_DIR=/data \
+  -e OPENCLAW_CONFIG_PATH=/data/openclaw.json \
+  -e OPENCLAW_GATEWAY_HOST=0.0.0.0 \
   -e OPENAI_API_KEY \
   openclaw-go
 ```
 
+### Docker Compose (gateway + smoke + tests)
+
+[`compose.yaml`](compose.yaml) runs the gateway with a named volume (`openclaw_data` → `/data`), **`OPENCLAW_GATEWAY_HOST=0.0.0.0`**, and **`OPENCLAW_CONFIG_PATH=/data/openclaw.json`**. On first start there is no config file yet — defaults apply (**echo** provider). Drop a prepared `openclaw.json` into the volume or bind-mount a host file over `/data/openclaw.json` if you need custom settings.
+
+```bash
+# Foreground gateway only (after image exists):
+docker compose up --build
+
+# Or via Makefile (builds image first):
+make compose-up
+
+# One-shot capability check: starts gateway + curl container (health + JSON-RPC health):
+docker compose --profile smoke up --build --abort-on-container-exit --exit-code-from smoke
+
+# Same via Makefile:
+make compose-smoke
+
+# Full Go test suite in a Linux + Go 1.24 container (bind-mounts the repo; no race flag):
+docker compose --profile test run --rm test
+# or: make compose-test
+
+# Optional integration tests (extra packages; hits live network where tests require it):
+OPENCLAW_INTEGRATION_TESTS=1 docker compose --profile test run --rm test
+# or: make compose-test-integration
+```
+
+Optional: create **`openclaw-go/.env`** with `OPENAI_API_KEY`, `OPENCLAW_GATEWAY_AUTH_TOKEN`, etc. Compose substitutes `${VAR:-}` from your environment or `.env`. With auth enabled, pass the same token to clients (see smoke container’s `OPENCLAW_TOKEN` wiring).
+
+After **`docker compose up`**, from the host open **`http://127.0.0.1:18789/ui/`** for the control panel (or **`http://127.0.0.1:18789/`**, which redirects there). Use **`OPENCLAW_PORT`** if you remap the published port.
+
 ### Run tests
 
 ```bash
-make test           # go test -race ./...
+make test           # go test -race ./... with a short timeout (see Makefile)
 ```
 
-Integration (optional; uses a temp config file and live `api.github.com`):
-
-```bash
-go test -tags=integration -count=1 -timeout 120s -p 1 ./...
-```
-
-Quick smoke (expects gateway already listening on `OPENCLAW_BASE_URL`, default `http://127.0.0.1:18789`):
-
-```bash
-bash scripts/smoke.sh   # Linux/macOS/Git Bash — set OPENCLAW_TOKEN if auth is enabled
-```
-
-In another terminal:
-
-```bash
-go run ./cmd/openclaw onboard
-go run ./cmd/openclaw doctor
-go run ./cmd/openclaw status
-go run ./cmd/openclaw rpc health
-go run ./cmd/openclaw agent "hello there"
-go run ./cmd/openclaw sessions
-```
+Full **manual + CI-style** checks (race, integration, e2e, smoke) are documented in **[Run and test capabilities](#run-and-test-capabilities)** above.
 
 ## Next parity milestones
 

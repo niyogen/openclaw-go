@@ -38,6 +38,7 @@ type Server struct {
 	trustedProxies        []string
 	allowedOrigins        map[string]struct{}
 	store                 *sessions.Store
+	runnerSwapMu          sync.RWMutex // protects runner + runnerFactory during ReloadAgentRunner / SetRunnerFactory
 	runner                agents.Runner
 	route                 *channels.Router
 	registry              *plugins.Registry
@@ -78,6 +79,13 @@ type Server struct {
 	memoryMu           sync.RWMutex
 	memoryCompactAfter int
 	memorySummarize    bool
+
+	// agentSummary* is updated from cmd/openclaw on startup and SIGHUP for gateway.status / UI.
+	agentSummaryMu          sync.RWMutex
+	agentSummaryProvider    string
+	agentSummaryModel       string
+	agentSummaryOpenAISet   bool
+	agentSummaryAnthropicSet bool
 }
 
 func New(
@@ -203,35 +211,101 @@ func (s *Server) SetDefaultMaxContextMessages(n int) {
 // SetRunnerFactory installs a factory used to create per-session runners when
 // a session has a specific provider/model override set.
 func (s *Server) SetRunnerFactory(fn func(provider, model string) agents.Runner) {
+	s.runnerSwapMu.Lock()
 	s.runnerFactory = fn
+	s.runnerSwapMu.Unlock()
+
+	s.runnerCacheMu.Lock()
+	s.runnerCache = map[string]agents.Runner{}
+	s.runnerCacheMu.Unlock()
+}
+
+// ReloadAgentRunner replaces the gateway-wide runner and the per-session runner
+// factory, then clears the per-session runner cache. Call after config changes
+// that affect model routing (cmd/openclaw startup and SIGHUP).
+func (s *Server) ReloadAgentRunner(runner agents.Runner, factory func(provider, model string) agents.Runner) {
+	s.runnerSwapMu.Lock()
+	s.runner = runner
+	s.runnerFactory = factory
+	s.runnerSwapMu.Unlock()
+
+	s.runnerCacheMu.Lock()
+	s.runnerCache = map[string]agents.Runner{}
+	s.runnerCacheMu.Unlock()
+}
+
+func (s *Server) globalRunner() agents.Runner {
+	s.runnerSwapMu.RLock()
+	defer s.runnerSwapMu.RUnlock()
+	return s.runner
+}
+
+// SetAgentSummary records operator-facing agent metadata for gateway.status.
+func (s *Server) SetAgentSummary(provider, model string, openAIKeySet, anthropicKeySet bool) {
+	s.agentSummaryMu.Lock()
+	defer s.agentSummaryMu.Unlock()
+	s.agentSummaryProvider = strings.TrimSpace(provider)
+	s.agentSummaryModel = strings.TrimSpace(model)
+	s.agentSummaryOpenAISet = openAIKeySet
+	s.agentSummaryAnthropicSet = anthropicKeySet
+}
+
+func (s *Server) agentSummaryPayload() map[string]any {
+	s.agentSummaryMu.RLock()
+	defer s.agentSummaryMu.RUnlock()
+	return map[string]any{
+		"provider":                   s.agentSummaryProvider,
+		"model":                      s.agentSummaryModel,
+		"openaiApiKeyConfigured":     s.agentSummaryOpenAISet,
+		"anthropicApiKeyConfigured": s.agentSummaryAnthropicSet,
+	}
 }
 
 // runnerForSession returns a session-specific Runner when the session has a
-// provider/model override, otherwise returns the global s.runner.
+// provider/model override, otherwise returns the global runner.
 // The cache lookup and session read happen under the same lock to avoid
 // TOCTOU races where SetSessionModel changes the model between the Get and
 // the cache insert.
 func (s *Server) runnerForSession(sessionID string) agents.Runner {
-	if s.runnerFactory == nil {
-		return s.runner
+	s.runnerSwapMu.RLock()
+	factory := s.runnerFactory
+	global := s.runner
+	s.runnerSwapMu.RUnlock()
+
+	if factory == nil {
+		return global
 	}
 	s.runnerCacheMu.Lock()
 	defer s.runnerCacheMu.Unlock()
 
 	sess, ok := s.store.Get(sessionID)
 	if !ok || (sess.Provider == "" && sess.Model == "") {
-		return s.runner
+		return global
 	}
 	key := sess.Provider + ":" + sess.Model
 	if r, exists := s.runnerCache[key]; exists {
 		return r
 	}
-	r := s.runnerFactory(sess.Provider, sess.Model)
+	r := factory(sess.Provider, sess.Model)
 	if r == nil {
-		return s.runner // factory returned nil — fall back to default
+		return global // factory returned nil — fall back to default
 	}
 	s.runnerCache[key] = r
 	return r
+}
+
+// runnerForProcessMessage picks the runner for one user message.
+//
+// Channel "ui" is reserved for the /ui control panel (Quick infer). Those
+// requests must follow the gateway-wide agent configuration, not a
+// per-session provider/model override. Otherwise the fixed sessionId "ui-infer"
+// can retain a legacy echo override in sessions.json and keep echoing even
+// after the operator switches agent.provider to openai in openclaw.json.
+func (s *Server) runnerForProcessMessage(req messageRequest) agents.Runner {
+	if strings.EqualFold(strings.TrimSpace(req.Channel), "ui") {
+		return s.globalRunner()
+	}
+	return s.runnerForSession(req.SessionID)
 }
 
 func (s *Server) Address() string {
@@ -808,7 +882,7 @@ func (s *Server) processMessage(ctx context.Context, req messageRequest) (string
 	if s.defaultMaxContextMsgs > 0 {
 		historyMessages = runtime.TruncateHistory(historyMessages, s.defaultMaxContextMsgs)
 	}
-	reply, err := s.runnerForSession(req.SessionID).GenerateReply(ctx, agents.Turn{
+	reply, err := s.runnerForProcessMessage(req).GenerateReply(ctx, agents.Turn{
 		Message: req.Message,
 		History: historyMessages,
 	})
@@ -944,7 +1018,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) gatewayStatus() map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"ok":                 true,
 		"service":            "openclaw-go-gateway",
 		"version":            Version,
@@ -953,7 +1027,9 @@ func (s *Server) gatewayStatus() map[string]any {
 		"metricsRequireAuth": s.metricsRequireAuth.Load(),
 		"uptime":             time.Since(s.startedAt).String(),
 		"time":               time.Now().UTC(),
+		"agent":              s.agentSummaryPayload(),
 	}
+	return out
 }
 
 type sessionIDParams struct {
@@ -1476,7 +1552,7 @@ func (s *Server) dispatchRPC(
 	case "doctor.check":
 		checks := map[string]any{}
 		checks["sessionStore"] = map[string]any{"ok": true, "sessions": s.store.Count()}
-		checks["runner"] = map[string]any{"ok": s.runner != nil}
+		checks["runner"] = map[string]any{"ok": s.globalRunner() != nil}
 		checks["eventBus"] = map[string]any{"ok": s.bus != nil}
 		checks["rateLimiter"] = map[string]any{"ok": s.rateLimiter != nil}
 		return map[string]any{"ok": true, "checks": checks, "version": Version}, nil
@@ -1674,8 +1750,9 @@ func (s *Server) dispatchRPC(
 
 	// ── models auth status ────────────────────────────────────────────────
 	case "models.authStatus":
-		_, isOpenAI := s.runner.(*agents.OpenAIRunner)
-		_, isAnthropic := s.runner.(*agents.AnthropicRunner)
+		gr := s.globalRunner()
+		_, isOpenAI := gr.(*agents.OpenAIRunner)
+		_, isAnthropic := gr.(*agents.AnthropicRunner)
 		return map[string]any{
 			"openai":    isOpenAI,
 			"anthropic": isAnthropic,
@@ -1691,7 +1768,7 @@ func (s *Server) dispatchRPC(
 			"name":    "openclaw-go-agent",
 			"version": Version,
 			"provider": func() string {
-				if s.runner != nil {
+				if s.globalRunner() != nil {
 					return "configured"
 				}
 				return "echo"

@@ -43,7 +43,7 @@ func buildTestServer(t *testing.T, authToken string) *Server {
 	}
 	registry := plugins.NewRegistry()
 	registry.Register(plugins.NewMetaPlugin(registry))
-	return New(
+	s := New(
 		"127.0.0.1",
 		0,
 		authToken,
@@ -54,6 +54,8 @@ func buildTestServer(t *testing.T, authToken string) *Server {
 		registry,
 		dir,
 	)
+	s.SetAgentSummary("echo", "echo", false, false)
+	return s
 }
 
 func TestHealthRouteIsPublic(t *testing.T) {

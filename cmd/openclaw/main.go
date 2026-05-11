@@ -756,21 +756,22 @@ func validateGatewayChannelConfig(cfg config.Config) error {
 	return nil
 }
 
-func runGateway(cfg config.Config) error {
-	if err := validateGatewayChannelConfig(cfg); err != nil {
-		return err
+// openClawDataDir returns the directory for sessions, gateway auxiliary stores, and the default
+// plugins directory when Gateway.PluginsDir is unset. OPENCLAW_DATA_DIR overrides ~/.openclaw-go
+// (used by the Docker image and docker-compose).
+func openClawDataDir() (string, error) {
+	if d := strings.TrimSpace(os.Getenv("OPENCLAW_DATA_DIR")); d != "" {
+		return filepath.Clean(d), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return "", err
 	}
-	statePath := filepath.Join(home, ".openclaw-go", "sessions.json")
-	store, err := sessions.New(statePath)
-	if err != nil {
-		return err
-	}
+	return filepath.Join(home, ".openclaw-go"), nil
+}
 
-	runner := agents.NewRunnerFromOptions(agents.RunnerOptions{
+func buildGatewayRunner(cfg config.Config) agents.Runner {
+	return agents.NewRunnerFromOptions(agents.RunnerOptions{
 		Provider:         cfg.Agent.Provider,
 		OpenAIAPIKey:     cfg.Providers.OpenAI.APIKey,
 		OpenAIBaseURL:    cfg.Providers.OpenAI.BaseURL,
@@ -779,6 +780,59 @@ func runGateway(cfg config.Config) error {
 		AnthropicBaseURL: cfg.Providers.Anthropic.BaseURL,
 		AnthropicModel:   cfg.Providers.Anthropic.Model,
 	})
+}
+
+func buildPerSessionRunnerFactory(cfg config.Config) func(provider, model string) agents.Runner {
+	return func(provider, model string) agents.Runner {
+		return agents.NewRunnerFromOptions(agents.RunnerOptions{
+			Provider:         provider,
+			OpenAIAPIKey:     cfg.Providers.OpenAI.APIKey,
+			OpenAIBaseURL:    cfg.Providers.OpenAI.BaseURL,
+			OpenAIModel:      model,
+			AnthropicAPIKey:  cfg.Providers.Anthropic.APIKey,
+			AnthropicBaseURL: cfg.Providers.Anthropic.BaseURL,
+			AnthropicModel:   model,
+		})
+	}
+}
+
+func warnAgentMisconfig(cfg config.Config) {
+	p := strings.ToLower(strings.TrimSpace(cfg.Agent.Provider))
+	if p == "openai" && strings.TrimSpace(cfg.Providers.OpenAI.APIKey) == "" {
+		fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: agent.provider is openai but no OpenAI API key is set (providers.openai.apiKey or OPENAI_API_KEY); replies will echo until a key is configured.\n")
+	}
+	if (p == "anthropic" || p == "claude") && strings.TrimSpace(cfg.Providers.Anthropic.APIKey) == "" {
+		fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: agent.provider is %s but no Anthropic API key is set.\n", cfg.Agent.Provider)
+	}
+}
+
+func pushAgentSummary(server *gateway.Server, cfg config.Config) {
+	server.SetAgentSummary(
+		cfg.Agent.Provider,
+		cfg.Agent.Model,
+		strings.TrimSpace(cfg.Providers.OpenAI.APIKey) != "",
+		strings.TrimSpace(cfg.Providers.Anthropic.APIKey) != "",
+	)
+}
+
+func runGateway(cfg config.Config) error {
+	if err := validateGatewayChannelConfig(cfg); err != nil {
+		return err
+	}
+	dataDir, err := openClawDataDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+	statePath := filepath.Join(dataDir, "sessions.json")
+	store, err := sessions.New(statePath)
+	if err != nil {
+		return err
+	}
+
+	runner := buildGatewayRunner(cfg)
 	channelRouter := channels.NewRouter()
 	if cfg.Channels.Webhook.Enabled {
 		channelRouter.Register(channels.NewWebhookChannel(cfg.Channels.Webhook.OutboundURL))
@@ -831,7 +885,7 @@ func runGateway(cfg config.Config) error {
 	// Load external plugins from configured directory.
 	pluginsDir := cfg.Gateway.PluginsDir
 	if pluginsDir == "" {
-		pluginsDir = filepath.Join(home, ".openclaw-go", "plugins")
+		pluginsDir = filepath.Join(dataDir, "plugins")
 	}
 	loader := plugins.NewLoader(pluginsDir)
 	if externalPlugins, err := loader.Load(); err == nil {
@@ -860,7 +914,7 @@ func runGateway(cfg config.Config) error {
 		runner,
 		channelRouter,
 		registry,
-		filepath.Join(home, ".openclaw-go"),
+		dataDir,
 	)
 
 	// Configure additional auth modes (password + trusted proxies).
@@ -885,18 +939,11 @@ func runGateway(cfg config.Config) error {
 		fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: config nodes → topology sync: %v\n", err)
 	}
 
-	// RunnerFactory enables per-session model routing.
-	server.SetRunnerFactory(func(provider, model string) agents.Runner {
-		return agents.NewRunnerFromOptions(agents.RunnerOptions{
-			Provider:         provider,
-			OpenAIAPIKey:     cfg.Providers.OpenAI.APIKey,
-			OpenAIBaseURL:    cfg.Providers.OpenAI.BaseURL,
-			OpenAIModel:      model,
-			AnthropicAPIKey:  cfg.Providers.Anthropic.APIKey,
-			AnthropicBaseURL: cfg.Providers.Anthropic.BaseURL,
-			AnthropicModel:   model,
-		})
-	})
+	warnAgentMisconfig(cfg)
+	server.ReloadAgentRunner(runner, buildPerSessionRunnerFactory(cfg))
+	pushAgentSummary(server, cfg)
+	fmt.Printf("[openclaw-go] gateway agent: provider=%s model=%s openaiApiKeyConfigured=%v\n",
+		cfg.Agent.Provider, cfg.Agent.Model, strings.TrimSpace(cfg.Providers.OpenAI.APIKey) != "")
 
 	server.SetMemoryCompaction(cfg.Memory)
 
@@ -933,7 +980,10 @@ func runGateway(cfg config.Config) error {
 				fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: config nodes → topology sync (SIGHUP): %v\n", err)
 			}
 			server.ApplyExtensionTools(reloaded)
-			fmt.Printf("[openclaw-go] config reloaded via SIGHUP (token, auth, origins, proxies, timeouts, metrics auth, nodes, memory, skills/mcp)\n")
+			warnAgentMisconfig(reloaded)
+			server.ReloadAgentRunner(buildGatewayRunner(reloaded), buildPerSessionRunnerFactory(reloaded))
+			pushAgentSummary(server, reloaded)
+			fmt.Printf("[openclaw-go] config reloaded via SIGHUP (token, auth, origins, proxies, timeouts, metrics auth, nodes, memory, skills/mcp, agent runner)\n")
 		}
 	}()
 
@@ -1182,6 +1232,22 @@ func runConfigure(cfg config.Config, args []string) error {
 			return fmt.Errorf("provider must be echo, openai, or anthropic")
 		}
 		cfg.Agent.Provider = value
+		switch value {
+		case "echo":
+			cfg.Agent.Model = "echo"
+		case "openai":
+			m := strings.TrimSpace(cfg.Providers.OpenAI.Model)
+			if m == "" {
+				m = config.Default().Providers.OpenAI.Model
+			}
+			cfg.Agent.Model = m
+		case "anthropic", "claude":
+			m := strings.TrimSpace(cfg.Providers.Anthropic.Model)
+			if m == "" {
+				m = config.Default().Providers.Anthropic.Model
+			}
+			cfg.Agent.Model = m
+		}
 		path, err := config.DefaultPath()
 		if err != nil {
 			return err
@@ -1189,7 +1255,7 @@ func runConfigure(cfg config.Config, args []string) error {
 		if err := config.Save(path, cfg); err != nil {
 			return err
 		}
-		fmt.Printf("agent.provider set to %s\n", value)
+		fmt.Printf("agent.provider set to %s\nagent.model set to %s\n", value, cfg.Agent.Model)
 		return nil
 	case "telegram":
 		return runConfigureTelegram(cfg, args[1:])

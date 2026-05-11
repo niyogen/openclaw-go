@@ -12,7 +12,8 @@ BUILD_DIR  := dist
 LDFLAGS    := -s -w -X $(MODULE)/internal/gateway.Version=$(VERSION)
 
 .PHONY: all build fmt vet test test-race e2e e2e-ps lint clean \
-        run-gateway docker-build docker-run release help smoke
+        run-gateway docker-build docker-run compose-up compose-smoke compose-test compose-test-integration \
+        e2e-playwright smoke-rpc-ui check-openai-key release help smoke
 
 ## Default target
 all: fmt vet test build
@@ -51,6 +52,9 @@ e2e-ps: build ## Run PowerShell E2E smoke test (Windows)
 smoke: ## Quick curl smoke (gateway must already be running; see scripts/smoke.sh)
 	bash scripts/smoke.sh
 
+check-openai-key: ## Verify OpenAI key via GET /v1/models (env or openclaw.json)
+	go run ./scripts/check-openai-key.go
+
 lint: ## Run staticcheck (install: go install honnef.co/go/tools/cmd/staticcheck@latest)
 	staticcheck ./...
 
@@ -71,14 +75,32 @@ docker-build: ## Build the Docker image
 		-t $(IMAGE):latest \
 		.
 
-docker-run: ## Run the gateway container (mounts ~/.openclaw-go as data dir)
+docker-run: ## Run the gateway container (bind-mount ~/.openclaw-go → /data; listens on 0.0.0.0)
 	docker run --rm \
 		-p 18789:18789 \
 		-v "$$HOME/.openclaw-go:/data" \
+		-e OPENCLAW_DATA_DIR=/data \
+		-e OPENCLAW_CONFIG_PATH=/data/openclaw.json \
+		-e OPENCLAW_GATEWAY_HOST=0.0.0.0 \
 		-e OPENCLAW_GATEWAY_AUTH_TOKEN \
 		-e OPENAI_API_KEY \
 		-e ANTHROPIC_API_KEY \
 		$(IMAGE):latest
+
+compose-up: docker-build ## docker compose: run gateway (foreground)
+	docker compose up gateway
+
+compose-smoke: docker-build ## docker compose: gateway + smoke profile (exits after smoke)
+	docker compose --profile smoke up --abort-on-container-exit --exit-code-from smoke
+
+compose-test: ## docker compose: go test ./... in golang container (mounts repo)
+	docker compose --profile test run --rm test
+
+compose-test-integration: ## same as compose-test with -tags=integration (network)
+	docker compose --profile test run --rm -e OPENCLAW_INTEGRATION_TESTS=1 test
+
+e2e-playwright: ## Browser E2E: install e2e-ui deps + Playwright Chromium, run Playwright
+	cd e2e-ui && npm install && npx playwright install chromium && npm test
 
 ## ── Cross-compile release artefacts ─────────────────────────────────────────
 

@@ -34,6 +34,10 @@ func TestRPCGatewayStatus(t *testing.T) {
 	if envelope.Result["version"] != Version {
 		t.Fatalf("expected version %q in result", Version)
 	}
+	ag, ok := envelope.Result["agent"].(map[string]any)
+	if !ok || ag["provider"] != "echo" {
+		t.Fatalf("expected agent.provider echo in gateway.status, got %#v", envelope.Result["agent"])
+	}
 }
 
 func TestRPCSessionsGetAndDelete(t *testing.T) {

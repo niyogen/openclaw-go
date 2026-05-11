@@ -255,21 +255,29 @@ func Load(path string) (Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return cfg, nil
+			return finalizeLoadedConfig(Default()), nil
 		}
 		return cfg, err
 	}
 	if len(raw) == 0 {
-		return cfg, nil
+		return finalizeLoadedConfig(Default()), nil
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return cfg, err
 	}
+	return finalizeLoadedConfig(cfg), nil
+}
+
+// finalizeLoadedConfig applies defaults and environment overrides after loading JSON (or when no file exists).
+func finalizeLoadedConfig(cfg Config) Config {
 	if cfg.Gateway.Host == "" {
 		cfg.Gateway.Host = "127.0.0.1"
 	}
 	if cfg.Gateway.Port == 0 {
 		cfg.Gateway.Port = 18789
+	}
+	if h := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_HOST")); h != "" {
+		cfg.Gateway.Host = h
 	}
 	if cfg.Gateway.AuthToken == "" {
 		cfg.Gateway.AuthToken = os.Getenv("OPENCLAW_GATEWAY_AUTH_TOKEN")
@@ -416,7 +424,7 @@ func Load(path string) (Config, error) {
 	if cfg.Channels.Nostr.Pubkey == "" {
 		cfg.Channels.Nostr.Pubkey = os.Getenv("NOSTR_PUBKEY")
 	}
-	return cfg, nil
+	return cfg
 }
 
 func Save(path string, cfg Config) error {

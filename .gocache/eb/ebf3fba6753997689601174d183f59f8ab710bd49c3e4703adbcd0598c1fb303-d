@@ -1,0 +1,4 @@
+./loader.go
+./meta.go
+./registry.go
+./loader_test.go

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -44,6 +45,11 @@ func (r *MultiRunner) GenerateReply(ctx context.Context, turn Turn) (string, err
 		if err == nil {
 			return reply, nil
 		}
+		if r.Fallback != nil {
+			log.Printf("openclaw-go: primary runner failed, using echo fallback: %v", err)
+			return r.Fallback.GenerateReply(ctx, turn)
+		}
+		return "", err
 	}
 	if r.Fallback != nil {
 		return r.Fallback.GenerateReply(ctx, turn)

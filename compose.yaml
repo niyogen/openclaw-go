@@ -1,0 +1,100 @@
+# OpenClaw-Go — local stack (gateway + optional smoke + optional Go test runner).
+#
+# Gateway only (foreground):
+#   docker compose up --build
+#
+# Gateway + one-shot smoke against http://gateway:18789:
+#   docker compose --profile smoke up --build --abort-on-container-exit --exit-code-from smoke
+#
+# Full test suite inside Linux + Go (mounts repo → /src), no gateway required:
+#   docker compose --profile test run --rm test
+# Integration tag (network; matches CI style):
+#   OPENCLAW_INTEGRATION_TESTS=1 docker compose --profile test run --rm test
+#
+# With auth, set OPENCLAW_GATEWAY_AUTH_TOKEN in your environment or a .env file.
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openclaw-go:latest
+    ports:
+      - "${OPENCLAW_PORT:-18789}:18789"
+    environment:
+      OPENCLAW_DATA_DIR: /data
+      OPENCLAW_CONFIG_PATH: /data/openclaw.json
+      OPENCLAW_GATEWAY_HOST: "0.0.0.0"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENCLAW_GATEWAY_AUTH_TOKEN: ${OPENCLAW_GATEWAY_AUTH_TOKEN:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+    volumes:
+      - openclaw_data:/data
+    restart: unless-stopped
+
+  smoke:
+    profiles: ["smoke"]
+    image: curlimages/curl:8.11.1
+    depends_on:
+      gateway:
+        condition: service_started
+    environment:
+      OPENCLAW_TOKEN: ${OPENCLAW_GATEWAY_AUTH_TOKEN:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "waiting for gateway..."
+        ok=0
+        i=0
+        while [ $$i -lt 45 ]; do
+          if curl -fsS --max-time 2 http://gateway:18789/health >/dev/null 2>&1; then ok=1; break; fi
+          i=$$((i + 1))
+          sleep 1
+        done
+        if [ $$ok -ne 1 ]; then echo "gateway did not become healthy in time"; exit 1; fi
+        hdr=""
+        if [ -n "$$OPENCLAW_TOKEN" ]; then hdr="-H Authorization: Bearer $$OPENCLAW_TOKEN"; fi
+        curl -fsS $$hdr http://gateway:18789/health | head -c 400
+        echo
+        curl -fsS $$hdr -X POST -H "Content-Type: application/json" \
+          -d '{"jsonrpc":"2.0","id":1,"method":"health","params":{}}' \
+          http://gateway:18789/rpc | head -c 400
+        echo
+        echo "--- gateway.status (agent / keys) ---"
+        curl -fsS $$hdr -X POST -H "Content-Type: application/json" \
+          -d '{"jsonrpc":"2.0","id":2,"method":"gateway.status","params":{}}' \
+          http://gateway:18789/rpc | head -c 800
+        echo
+        echo "--- message.send channel=ui (Quick infer path) ---"
+        curl -fsS $$hdr -X POST -H "Content-Type: application/json" \
+          -d '{"jsonrpc":"2.0","id":3,"method":"message.send","params":{"sessionId":"compose-smoke-ui","message":"ping","channel":"ui"}}' \
+          http://gateway:18789/rpc | head -c 600
+        echo
+        echo "compose smoke OK"
+
+  test:
+    profiles: ["test"]
+    image: golang:1.24-bookworm
+    working_dir: /src
+    volumes:
+      - .:/src
+    environment:
+      GOTOOLCHAIN: local
+      OPENCLAW_INTEGRATION_TESTS: ${OPENCLAW_INTEGRATION_TESTS:-0}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        cd /src
+        go mod download
+        FLAGS=""
+        if [ "${OPENCLAW_INTEGRATION_TESTS:-0}" = "1" ]; then
+          FLAGS="-tags=integration -p 1"
+        fi
+        exec go test $$FLAGS -count=1 -timeout 120s ./...
+
+volumes:
+  openclaw_data:

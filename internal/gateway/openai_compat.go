@@ -95,7 +95,7 @@ func (s *Server) handleV1Responses(w http.ResponseWriter, r *http.Request) {
 		s.handleV1ChatStream(w, ctx, model, req.Input, turn)
 		return
 	}
-	reply, err := s.runner.GenerateReply(ctx, turn)
+	reply, err := s.globalRunner().GenerateReply(ctx, turn)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error": map[string]string{"message": err.Error(), "type": "server_error"},
@@ -221,7 +221,7 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	checks["sessions"] = map[string]any{"ok": true, "count": len(sessions)}
 
 	// Check runner is configured.
-	if s.runner == nil {
+	if s.globalRunner() == nil {
 		checks["runner"] = map[string]any{"ok": false, "reason": "no runner configured"}
 		allOK = false
 	} else {
@@ -350,7 +350,7 @@ func (s *Server) handleV1ChatBlocking(
 	model, prompt string,
 	turn agents.Turn,
 ) {
-	reply, err := s.runner.GenerateReply(ctx, turn)
+	reply, err := s.globalRunner().GenerateReply(ctx, turn)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error": map[string]any{
@@ -426,7 +426,7 @@ func (s *Server) handleV1ChatStream(
 	out := make(chan agents.StreamChunk, 32)
 	go func() {
 		defer close(out)
-		agents.Stream(ctx, s.runner, turn, out)
+		agents.Stream(ctx, s.globalRunner(), turn, out)
 	}()
 
 	// replyWords accumulates the completion token count using the same

@@ -1,0 +1,3 @@
+./loader.go
+./meta.go
+./registry.go
