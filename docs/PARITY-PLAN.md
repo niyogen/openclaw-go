@@ -11,20 +11,25 @@ A user running openclaw-go to assist with messaging, tooling, and automation
 should find that the platform handles the same workflows as upstream, even
 if the long-tail integrations (Xiaomi, Tlon, Zalo, etc.) remain absent.
 
-Today's coverage estimate: **~55-60%**. Closing to 80% means filling the
-gaps below, in order.
+Today's coverage estimate: **~80%** as of v0.5.0 (2026-05-12). Initial
+target hit. Remaining gap is mostly voice scope + long-tail channels +
+the wizard interactive CLI. Sections below preserved for history; see
+the status table at the bottom for current state.
 
 ## Coverage snapshot
 
+Refreshed 2026-05-12 after v0.4.0 (push + web + IMAP + 4 channels)
+and v0.5.0 (plugin architecture).
+
 | Surface | Upstream | openclaw-go | Gap |
 |---|---|---|---|
-| RPC namespaces | ~30 (cron, sessions, agent, tools, channels, secrets, config, cron, hooks, doctor, models, push, node, device, talk, voicewake, tts, models, skills, update, usage, wizard, artifacts, web, connect, system, native-hook, plugin-host-hooks, exec.approval, plugin.approval, …) | ~25 (most of the above except push, web, voicewake, plugin-host-hooks, native-hook-relay) | 5 namespaces missing |
-| RPC methods | ~120 named methods | ~80 named methods | ~40 methods (mostly within partial namespaces) |
-| Channels | ~25 messaging channels (Slack, Discord, Telegram, WhatsApp, Line, Teams, Signal, Mattermost, Matrix, BlueBubbles, iMessage, Nextcloud Talk, Synology Chat, IRC, Tlon, Nostr, Voice Call, Google Meet, Twitch, Email/Gmail, Feishu, QQ Bot, Zalo, Xiaomi, Zephyr, generic webhook) | 8 (Discord, Slack, Telegram, WhatsApp, Line, Teams, Nostr, generic webhook) | ~17 channels missing; only need ~4 high-value to reach 80% by user value |
-| CLI commands | ~40 top-level commands incl. setup/onboard/dashboard/backup/migrate/message/commitments/tasks/security/plugins subcli/hooks subcli/etc. | ~30 top-level commands | ~10 commands missing |
-| Built-in tools | Plugin-driven (dozens via bundled extensions) | 5 (`time.now`, `echo`, `sessions.count`, `sandbox.run`, `sandbox.available`) | Tool surface depends on plugin system, not core code |
+| RPC namespaces | ~30 (cron, sessions, agent, tools, channels, secrets, config, cron, hooks, doctor, models, push, node, device, talk, voicewake, tts, models, skills, update, usage, wizard, artifacts, web, connect, system, native-hook, plugin-host-hooks, exec.approval, plugin.approval, …) | ~28 (the above except voicewake, native-hook-relay; plugin-host-hooks superseded by v0.5.0 hook-plugin contract) | ~2 namespaces missing (voicewake + native-hook-relay) |
+| RPC methods | ~120 named methods | ~110 named methods (added push.\*, web.login.\*, plugin.approval.\*, plugins.tool.\*, plugins.hook.\*, sessions.compaction.\*) | ~10 methods (voicewake + native-hook-relay + a handful of wizard interactive methods) |
+| Channels | ~25 messaging channels (Slack, Discord, Telegram, WhatsApp, Line, Teams, Signal, Mattermost, Matrix, BlueBubbles, iMessage, Nextcloud Talk, Synology Chat, IRC, Tlon, Nostr, Voice Call, Google Meet, Twitch, Email/Gmail, Feishu, QQ Bot, Zalo, Xiaomi, Zephyr, generic webhook) | 12 (Discord, Slack, Telegram, WhatsApp, Line, Teams, Nostr, Signal, Matrix, Mattermost, Email w/ IMAP, generic webhook) | ~13 channels missing; all are long-tail by user value. Bidirectional gap remains on Signal/Matrix/Mattermost (outbound shipped, inbound deferred) |
+| CLI commands | ~40 top-level commands incl. setup/onboard/dashboard/backup/migrate/message/commitments/tasks/security/plugins subcli/hooks subcli/etc. | ~38 top-level commands (added onboard flag-form, dashboard, backup [list], restore, web-login, compaction, daemon install/uninstall/path, configure email/signal/matrix/mattermost, plugins channel/tool/hook subcli, message send/history/dispatch) | ~2 commands missing: `commitments`, `tasks`, `migrate` |
+| Built-in tools | Plugin-driven (dozens via bundled extensions) | 5 (`time.now`, `echo`, `sessions.count`, `sandbox.run`, `sandbox.available`) + tool-plugin contract from v0.5.0 (operators ship more via approved manifests) | Tool surface now matches upstream's "tools come from plugins" model |
 | Agent runners | Per-extension model catalog | Echo / OpenAI / Anthropic / Multi | Good coverage; consider Gemini |
-| Control UI | Bundled SPA served at `/ui/*` | None | Defer — frontend out of scope for Go MVP |
+| Control UI | Bundled SPA served at `/ui/*` | Minimal embedded panel (`internal/gateway/ui/`) with sessions/cron/hooks/approvals/compactions/push cards | Functional gap; not full upstream SPA |
 
 ## P0 — Close existing partial surfaces (must-have)
 
@@ -226,7 +231,42 @@ Recommended order — each block ends in `go test ./...` green before the next:
 12. **P3** plugin architecture polish.
 
 Estimated time to 80%: ~18-22 working days at the current pace, assuming
-single-developer cadence with test-after-every-change.
+single-developer cadence with test-after-every-change. **Actual: 80%
+reached 2026-05-12** across the v0.3.x → v0.5.0 sweep.
+
+## Post-80% pickups (toward 90%+)
+
+Original P0–P3 closed (or explicitly deferred behind triggers). Next
+parity work, in rough value order:
+
+1. **Inbound paths for Signal / Matrix / Mattermost.** Outbound shipped
+   in v0.4.0. Inbound completes bidirectional parity on the three new
+   channels.
+   - Signal: poll `/v1/receive` or subscribe via SSE on the signal-cli
+     sidecar; map to `InboundMessage` with sender phone as session id.
+   - Matrix: `/sync` long-poll on the homeserver client-server API;
+     filter to room ids the operator declared.
+   - Mattermost: register outgoing-webhook handler (POST from MM →
+     gateway endpoint with shared-token verification).
+   - **Size:** ~2 days each. Files: extend `internal/channels/{signal,matrix,mattermost}.go` with `Poll(ctx)` or
+     webhook handlers; plumb through `cmd/openclaw/main.go`.
+2. **v0.6.0 voice scope B** — voicewake / TTS depth / voice call.
+   Adds the largest single missing namespace (`voicewake`) plus the
+   TTS persona/provider depth tracked in `PARITY.md`. Estimated 5-6
+   days; plan-mode design pass needed first.
+3. **Wizard interactive CLI.** Current `onboard` is flag-driven only;
+   upstream's interactive wizard walks `wizard.start → next → status`.
+   Stubs exist; needs the loop wired in `cmd/openclaw/main.go` and
+   real prompts via `bufio.Scanner`. ~1 day.
+4. **`commitments` / `tasks` subsystem** — has explicit defer trigger
+   ("requires designing the state model first"). Real upstream
+   feature; ~1.5-2 days once design landed.
+5. **`migrate` CLI** — has explicit defer trigger ("speculative
+   versioning today would just add an unused field"). Pickup when the
+   first incompatible config change is proposed.
+6. **Long-tail channels** — BlueBubbles, iMessage, Nextcloud Talk,
+   Synology, IRC, Twitch, Feishu, QQ, Zalo, Xiaomi, Zephyr, Tlon. By
+   user value, low; only worth picking up when a user asks.
 
 ## Status updates
 
@@ -247,4 +287,5 @@ execution log.
 | P1.3 matrix channel | **done** (outbound) | landed 2026-05-12; `matrix.go` PUTs `/_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}` with bearer token; per-process unique txn ids; rejects room aliases (resolve first); 6 tests. Inbound (`/sync` long-poll) deferred |
 | P1.4 mattermost channel | **done** (outbound) | landed 2026-05-12; `mattermost.go` POSTs `/api/v4/posts` with bearer; threading via `ThreadID → root_id`; 6 tests. Inbound (outgoing webhook from MM) deferred — users can wire MM's outgoing webhook into the generic webhook channel today |
 | P2 CLI coverage | **partial+** | landed 2026-05-12: real `runBackup` (with `list` subcommand and missing-dir guard), new `runRestore <path> --yes` that merges a backup into the live data dir, AND new `dashboard` command that derives the gateway URL from config and best-effort opens it in the user's browser (Windows: rundll32, macOS: open, Linux: xdg-open). 9 tests total — 5 for backup/restore, 4 for dashboard (URL defaults, URL config, runDashboard survives launcher failure, openBrowser dispatches by GOOS). **Remaining P2 deferred**: `message`/`commitments`/`tasks` are wrappers over existing RPCs; `daemon install/uninstall` is platform-specific service-manager code, large |
-| P3 plugin architecture | **design note landed, implementation pending** | `docs/PLUGIN-ARCHITECTURE.md` written 2026-05-12. Covers three contracts (channel / tool / hook), HTTP-only (no in-process Go plugins — failure modes unacceptable), pending→approved lifecycle, fire-and-forget hook delivery. **Implementation deferred** until a real plugin needs a contract the existing manifest doesn't cover. Forcing functions documented in the design note's "Pickup trigger" section |
+| P3 plugin architecture | **done** | shipped as **v0.5.0** (release commit `d28a0d9`, tag `v0.5.0`, pushed 2026-05-12). Four iterations on branch `cloude-code`: iter 1 channel-plugin runtime (`a3aa8c5`) — manifest types, gateway-side `pluginChannel`, inbound handler with per-plugin token auth, `plugin.approval.*` RPCs, `pkg/channelplugin` SDK; iter 2 Telegram migrated (`ffa86fb` + race-fix follow-up `b5f5ae4`) — polling-mode v1 only (webhook mode deferred); iter 3 WhatsApp migrated **outbound only** (`efdab34`) — inbound stays at gateway because Meta-driven public-URL webhooks can't move; iter 4a tool-plugin contract (`d977a2b`) — `ToolPluginRegistry` + `pkg/toolplugin` SDK + `plugins.tool.list/approve/revoke` RPCs + CLI; iter 4b hook-plugin contract (`ffffe06`) — new `hookstore.EventListener` extension surface + `pkg/hookplugin` SDK + `plugins.hook.*` RPCs + CLI. Lint cleanup `72c2d7a` (gosimple S1016 + go.mod tidy). ~80 new test functions across plugin runtime/SDKs/RPCs/migrations. CI green on Linux/macOS/Windows × Go 1.22/1.24 including `-race` on Linux/macOS (run 25753234773). |
+| v0.5.0 follow-ups | **deferred (not blocking parity)** | (1) Reference example plugins under `plugins/example-tool/` + `plugins/example-hook/` — SDK contracts well-tested, examples optional. (2) Hot-registration of plugin tools/hooks on runtime approval — operator restarts to pick them up (matches channel-plugin posture). (3) Token verification on hook delivery (gateway → plugin) — reserved envelope field; contract doesn't yet send it. (4) Webhook-mode plugin migration for Telegram. (5) WhatsApp plugin inbound (Meta-webhook). |
