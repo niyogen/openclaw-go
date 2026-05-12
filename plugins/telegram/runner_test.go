@@ -276,6 +276,12 @@ func TestInboundDispatchPostsToGateway(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────
 
 func TestListenShutsDownOnCtxCancel(t *testing.T) {
+	// What this test pins: listen() returns nil within a few seconds
+	// after ctx is cancelled. We deliberately do NOT inspect tp.server
+	// from the test goroutine — that's a field written inside listen()'s
+	// goroutine, and a defensive "is it initialized" peek was flagged
+	// as a data race by CI. The shutdown semantic is the contract;
+	// the field layout is an implementation detail.
 	tp := newTestPlugin(t, func(_ context.Context, _ channelplugin.OutboundMessage) error { return nil })
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -284,15 +290,10 @@ func TestListenShutsDownOnCtxCancel(t *testing.T) {
 		listenDone <- tp.listen(ctx, "127.0.0.1:0") // ephemeral port
 	}()
 
-	// Give the server a moment to bind.
+	// Give the server a moment to bind, then cancel and assert shutdown.
 	time.Sleep(150 * time.Millisecond)
-
-	// Sanity: the server is up.
-	if tp.server == nil || tp.server.Addr == "" {
-		t.Fatal("server not initialized")
-	}
-
 	cancel()
+
 	select {
 	case err := <-listenDone:
 		if err != nil {

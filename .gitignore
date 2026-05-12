@@ -3,6 +3,13 @@ dist/
 dist/openclaw
 dist/openclaw.exe
 
+# Stray plugin binaries from `go build` inside plugin dirs (e.g.
+# `go build ./plugins/telegram` drops telegram.exe in the repo root on
+# Windows). Plugin binaries are not source.
+/telegram.exe
+/whatsapp.exe
+plugins/*/*.exe
+
 # Local data and secrets (never commit)
 *.env
 .env.*
