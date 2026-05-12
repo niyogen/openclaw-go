@@ -1,0 +1,9 @@
+{
+  "name": "whatsapp",
+  "version": "0.5.0",
+  "description": "WhatsApp Cloud API channel plugin (outbound only in v1) — sends messages via graph.facebook.com /messages; inbound continues to flow through the gateway's webhook handler since WhatsApp is webhook-only.",
+  "channel": {
+    "channel": "whatsapp",
+    "baseUrl": "http://127.0.0.1:9102"
+  }
+}

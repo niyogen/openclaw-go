@@ -110,6 +110,17 @@ type WhatsAppChannelConfig struct {
 	WebhookPath   string `json:"webhookPath"`
 	VerifyToken   string `json:"verifyToken"`
 	AppSecret     string `json:"appSecret"`
+	// UsePlugin, when true, makes the gateway skip the in-process
+	// WhatsApp outbound channel and rely on the out-of-process plugin
+	// at `plugins/whatsapp/` for outbound delivery. Unlike Telegram's
+	// UsePlugin (which moves BOTH directions to the plugin), this flag
+	// only affects outbound: WhatsApp inbound is webhook-only (Meta's
+	// signed POST hits a public URL), so the gateway continues to host
+	// the inbound webhook handler. Operator must approve the plugin
+	// (`openclaw plugins channel approve whatsapp`) AND launch the
+	// plugin binary separately for outbound to work. Default false
+	// keeps backward-compat with deployments running the built-in.
+	UsePlugin bool `json:"usePlugin"`
 }
 
 type LineChannelConfig struct {

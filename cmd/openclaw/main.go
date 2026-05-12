@@ -730,6 +730,7 @@ func printUsage() {
 	fmt.Println("  openclaw configure whatsapp enable <true|false>")
 	fmt.Println("  openclaw configure whatsapp inbound-mode <webhook>")
 	fmt.Println("  openclaw configure whatsapp webhook-path <path>")
+	fmt.Println("  openclaw configure whatsapp use-plugin <true|false>")
 	fmt.Println("  openclaw configure email enable|host|port|user|password|from <value>")
 	fmt.Println("                          |inbound-enable|imap-host|imap-port|imap-tls")
 	fmt.Println("                          |imap-mailbox|imap-poll <value>")
@@ -937,7 +938,14 @@ func runGateway(cfg config.Config) error {
 			cfg.Channels.Teams.OutboundURL,
 		))
 	}
-	if cfg.Channels.WhatsApp.Enabled {
+	if cfg.Channels.WhatsApp.Enabled && !cfg.Channels.WhatsApp.UsePlugin {
+		// Built-in outbound path. Skipped when UsePlugin=true; in that
+		// case the out-of-process WhatsApp plugin registers a
+		// pluginChannel with the same "whatsapp" name via the
+		// channel-plugin registry. The inbound webhook handler below
+		// is NOT gated by UsePlugin — WhatsApp inbound is webhook-only
+		// (Meta-driven public URL) and continues to live in the
+		// gateway.
 		channelRouter.Register(channels.NewWhatsAppChannel(
 			cfg.Channels.WhatsApp.AccessToken,
 			cfg.Channels.WhatsApp.PhoneNumberID,
@@ -2162,6 +2170,20 @@ func runConfigureWhatsApp(cfg config.Config, args []string) error {
 		}
 		fmt.Printf("channels.whatsapp.webhookPath set to %s\n", pathValue)
 		return nil
+	case "use-plugin":
+		// Flips WhatsApp outbound between in-process (false, default)
+		// and the out-of-process plugin at `plugins/whatsapp/` (true).
+		// Note: unlike Telegram, this only affects OUTBOUND. WhatsApp
+		// inbound is webhook-only (Meta-driven) and continues to flow
+		// through the gateway's webhook handler regardless. Operator
+		// must also approve the plugin and launch its binary
+		// separately — see docs/PLUGIN-ARCHITECTURE.md.
+		v, err := parseBoolArg(args[1])
+		if err != nil {
+			return err
+		}
+		cfg.Channels.WhatsApp.UsePlugin = v
+		return saveAndAnnounce(cfg, "channels.whatsapp.usePlugin set to %v", v)
 	default:
 		return fmt.Errorf("unknown whatsapp configure command")
 	}
