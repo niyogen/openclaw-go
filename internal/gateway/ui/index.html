@@ -63,6 +63,37 @@
       <button onclick="doInfer()">Send</button>
       <pre id="infer-output" style="margin-top:0.5rem"></pre>
     </div>
+
+    <!-- Approvals: live list of pending tool-call approvals with inline
+         Approve / Reject. Replaces having to long-poll /approvals or
+         switch to a terminal. Auto-refreshes alongside the other cards. -->
+    <div class="card" style="grid-column: span 2">
+      <h2>Pending approvals</h2>
+      <div id="approvals-list" style="font-size:0.85rem">loading…</div>
+    </div>
+
+    <!-- Compactions: an operator picks a session id and gets the list of
+         past compaction events with Restore / Branch buttons. Branch
+         requires entering a new session id inline. -->
+    <div class="card" style="grid-column: span 2">
+      <h2>Session compactions</h2>
+      <div style="display:flex;gap:0.5rem;margin-bottom:0.5rem">
+        <input id="compaction-session" type="text" placeholder="session id (e.g. sess-abc)" style="flex:1;padding:0.5rem;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:0.375rem;font-size:0.875rem" />
+        <button onclick="loadCompactions()">Load</button>
+      </div>
+      <div id="compaction-list" style="font-size:0.85rem"></div>
+    </div>
+
+    <!-- Push: list registered subscriptions and offer a "test all" button
+         so the operator can verify the round-trip. The in-browser
+         subscribe flow needs a service worker — deferred. -->
+    <div class="card" style="grid-column: span 2">
+      <h2>Web push subscriptions</h2>
+      <div id="push-status" class="sub" style="margin-bottom:0.5rem">loading…</div>
+      <div id="push-list" style="font-size:0.85rem"></div>
+      <button id="push-test-button" onclick="doPushTest()" disabled style="margin-top:0.5rem">Trigger test push to all</button>
+      <pre id="push-test-output" style="margin-top:0.5rem"></pre>
+    </div>
   </div>
 </main>
 <script>
@@ -88,6 +119,14 @@ async function rpc(method, params={}) {
     throw new Error(m);
   }
   return j.result;
+}
+
+// Escape any HTML-special chars in a string so we can interpolate
+// arbitrary RPC-returned content into innerHTML without an XSS risk.
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;',
+  }[c]));
 }
 
 async function refresh() {
@@ -121,9 +160,154 @@ async function refresh() {
       document.getElementById('log-output').textContent =
         logs.logs.map(l => `[${l.level}] ${l.component}: ${l.message}`).join('\n') || '(no logs)';
     }
+
+    // Approvals — list pending ones with inline approve/reject buttons.
+    await refreshApprovals();
+
+    // Push subscriptions + test button state.
+    await refreshPushPanel();
   } catch(e) {
     document.getElementById('status').className = '';
     document.getElementById('gw-status').textContent = 'offline';
+  }
+}
+
+async function refreshApprovals() {
+  const el = document.getElementById('approvals-list');
+  try {
+    const list = await rpc('approvals.list');
+    if (!Array.isArray(list) || list.length === 0) {
+      el.textContent = '(no pending approvals)';
+      return;
+    }
+    el.innerHTML = list.map(a => `
+      <div style="border-top:1px solid #334155;padding:0.5rem 0;display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap">
+        <div>
+          <strong>${esc(a.tool || '(no tool)')}</strong> &middot; <span style="color:#64748b">${esc(a.sessionId || '')}</span><br/>
+          <code style="color:#94a3b8;font-size:0.75rem">${esc(a.id)}</code>
+        </div>
+        <div>
+          <button onclick="approve('${esc(a.id)}', true)" style="background:#22c55e">Approve</button>
+          <button onclick="approve('${esc(a.id)}', false)" style="background:#ef4444">Reject</button>
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    el.textContent = 'error: ' + e.message;
+  }
+}
+
+async function approve(id, ok) {
+  try {
+    await rpc('approvals.decide', {id, approved: ok});
+    await refreshApprovals();
+  } catch (e) {
+    alert('decide failed: ' + e.message);
+  }
+}
+
+async function loadCompactions() {
+  const sessionId = document.getElementById('compaction-session').value.trim();
+  const out = document.getElementById('compaction-list');
+  if (!sessionId) {
+    out.textContent = 'enter a session id above';
+    return;
+  }
+  try {
+    const list = await rpc('sessions.compaction.list', {sessionId});
+    if (!Array.isArray(list) || list.length === 0) {
+      out.textContent = '(no compactions recorded for this session)';
+      return;
+    }
+    out.innerHTML = list.map(rec => `
+      <div style="border-top:1px solid #334155;padding:0.5rem 0">
+        <code style="color:#94a3b8;font-size:0.75rem">${esc(rec.id)}</code>
+        <span style="margin-left:0.5rem;color:#64748b">at ${esc(rec.at)}, kept ${rec.keepN}, removed ${rec.removedCount}</span><br/>
+        <button onclick="compactRestore('${esc(rec.id)}')" style="margin-top:0.5rem">Restore</button>
+        <button onclick="compactBranch('${esc(rec.id)}')">Branch into new session</button>
+      </div>
+    `).join('');
+  } catch (e) {
+    out.textContent = 'error: ' + e.message;
+  }
+}
+
+async function compactRestore(id) {
+  if (!confirm('Restore will REPLACE the current session messages with the snapshot. Continue?')) return;
+  try {
+    await rpc('sessions.compaction.restore', {id});
+    await loadCompactions();
+  } catch (e) {
+    alert('restore failed: ' + e.message);
+  }
+}
+
+async function compactBranch(id) {
+  const newId = prompt('New session id for the branch (leave blank to auto-generate):');
+  if (newId === null) return; // user cancelled
+  try {
+    const sess = await rpc('sessions.compaction.branch', {id, newSessionId: newId.trim()});
+    alert('branched into session: ' + (sess && sess.id ? sess.id : '(unknown)'));
+  } catch (e) {
+    alert('branch failed: ' + e.message);
+  }
+}
+
+async function refreshPushPanel() {
+  const status = document.getElementById('push-status');
+  const listEl = document.getElementById('push-list');
+  const button = document.getElementById('push-test-button');
+  try {
+    const list = await rpc('push.web.list');
+    if (!Array.isArray(list)) {
+      status.textContent = 'push is not configured (set gateway.pushContact in config)';
+      listEl.textContent = '';
+      button.disabled = true;
+      return;
+    }
+    status.textContent = list.length === 0
+      ? 'push is enabled — no subscriptions yet'
+      : `${list.length} subscription${list.length === 1 ? '' : 's'} registered`;
+    button.disabled = list.length === 0;
+    listEl.innerHTML = list.map(s => `
+      <div style="border-top:1px solid #334155;padding:0.5rem 0">
+        <strong>${esc(s.label || '(no label)')}</strong> &middot;
+        <code style="color:#94a3b8;font-size:0.75rem">${esc(s.id)}</code><br/>
+        <span style="color:#64748b;font-size:0.75rem;word-break:break-all">${esc(s.endpoint || '')}</span><br/>
+        <button onclick="pushUnsubscribe('${esc(s.id)}')" style="background:#ef4444;margin-top:0.25rem">Remove</button>
+      </div>
+    `).join('');
+  } catch (e) {
+    // push.web.list returns -32001 when push is not configured. Treat
+    // that as informational, not an error.
+    if (/not configured/i.test(e.message)) {
+      status.textContent = 'push is not configured (set gateway.pushContact in config)';
+      listEl.textContent = '';
+      button.disabled = true;
+      return;
+    }
+    status.textContent = 'error: ' + e.message;
+  }
+}
+
+async function pushUnsubscribe(id) {
+  if (!confirm('Remove this push subscription?')) return;
+  try {
+    await rpc('push.web.unsubscribe', {id});
+    await refreshPushPanel();
+  } catch (e) {
+    alert('unsubscribe failed: ' + e.message);
+  }
+}
+
+async function doPushTest() {
+  const out = document.getElementById('push-test-output');
+  out.textContent = '…';
+  try {
+    await rpc('push.test', {message: 'test from /ui/'});
+    out.textContent = 'sent — check your registered devices';
+  } catch (e) {
+    out.textContent = 'error: ' + e.message;
   }
 }
 
