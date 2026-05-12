@@ -9,6 +9,124 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 
 Nothing yet.
 
+## [0.5.0] - 2026-05-12
+
+"Plugin architecture." Lifts the previously-deferred P3 work to a
+first-class extension surface: channel, tool, and hook plugins all
+share the same scan → approve → dispatch shape with per-plugin tokens
+persisted at 0o600. Built-in Telegram and WhatsApp channels now run
+as plugins behind a config flag (built-in path retained until plugin
+reaches parity — no big-bang switch). Commits on the branch:
+`a3aa8c5`, `ffa86fb`, `b5f5ae4`, `efdab34`, `d977a2b`, `ffffe06`,
+`72c2d7a`.
+
+### Added
+
+- **Channel-plugin runtime** (`a3aa8c5`, iter 1/4). New
+  `internal/plugins/runtime.go` introduces `ChannelPluginRegistry`
+  scanning `$dataDir/plugins/*/plugin.json` and a gateway-side
+  `pluginChannel` adapter that forwards outbound messages over HTTP
+  to the plugin process. Inbound handler at
+  `/plugins/{name}/inbound` validates the per-plugin token. New RPCs
+  `plugin.approval.list/approve/revoke` (mirrors the approval-queue
+  shape). New `pkg/channelplugin/` SDK: plugin authors implement
+  `Send(ctx, OutboundMessage)` and the SDK handles HTTP, token
+  loading, graceful shutdown. Tokens persisted to
+  `$dataDir/channel-plugin-tokens.json` at 0o600.
+- **Telegram migrated to channel plugin** (`ffa86fb`, iter 2/4).
+  Polling-mode only in v1; webhook-mode plugin deferred. Plugin
+  binary at `plugins/telegram/`, listens on :9101 by convention.
+  Reuses `internal/channels.TelegramChannel` + `TelegramPoller` as
+  a library (Path α from PLUGIN-ARCHITECTURE.md). Config flag
+  `channels.telegram.usePlugin` (default false) toggles in-process vs
+  out-of-process; gateway-side register block is skipped when true.
+  11 tests in `plugins/telegram/runner_test.go`.
+- **WhatsApp migrated to channel plugin — outbound only** (`efdab34`,
+  iter 3/4). Inbound stays at the gateway because WhatsApp inbound is
+  webhook-only (Meta-driven public URL, no polling equivalent).
+  `UsePlugin` gates only the outbound register block; the inbound
+  webhook handler at `cfg.Channels.WhatsApp.WebhookPath` is mounted
+  unconditionally. Plugin listens on :9102. Config flag
+  `channels.whatsapp.usePlugin` + new CLI `openclaw configure
+  whatsapp use-plugin <true|false>`. 10 tests.
+- **Tool-plugin contract** (`d977a2b`, iter 4a/4). The existing
+  `Manifest.Tools[]` was data-only (logged at startup, never
+  registered). Iter 4a wires it. `ToolPluginRegistry` mirrors the
+  channel-plugin pattern; tokens at
+  `$dataDir/tool-plugin-tokens.json`. `pkg/toolplugin/` SDK exposes
+  `Plugin.RegisterTool(name, handler)` with `/tool/{name}` routing.
+  `Server.Tools()` accessor exposed so cmd/openclaw can register
+  approved tools with the gateway `ToolRegistry`. 3 RPCs
+  (`plugins.tool.list/approve/revoke`). CLI `openclaw plugins tool
+  list|approve|revoke <name>`. 29 tests across runtime + SDK + RPC.
+- **Hook-plugin contract** (`ffffe06`, iter 4b/4). Plugins subscribe
+  to hookstore events via `hooks[]` in plugin.json; gateway POSTs
+  `{event, payload, timestamp RFC3339}` to each declared endpoint on
+  matching events. Fire-and-forget, 10s client timeout, no retries.
+  Key infra: new `hookstore.EventListener` type + `Store.AddListener`
+  + `Emit` fan-out (listeners are in-memory only, not persisted to
+  the hook JSON file, so plugin-hook subscriptions reload from
+  manifest each restart). `NewPluginHookDispatcher(approved)`
+  builds an event → []endpoint index at construction for O(matching)
+  dispatch. `pkg/hookplugin/` SDK with `Plugin.HandlePath`; SDK
+  recovers from handler panics so one bad event doesn't kill the
+  plugin process. 3 RPCs (`plugins.hook.list/approve/revoke`). CLI
+  `openclaw plugins hook ...`. 29 tests.
+
+### Changed
+
+- `internal/hookstore` gained the `EventListener` extension surface
+  alongside the existing persisted-Hook model. Operator-visible
+  hooks and plugin-derived hooks stay cleanly separated.
+- `internal/gateway/server.go` exposes `Server.Tools()`,
+  `Server.HookStore()`, and `SetHookPluginRegistry` accessors so
+  `cmd/openclaw` can wire plugin registries from outside the package
+  without violating layering.
+
+### Fixed
+
+- **Race on `tp.server` in Telegram plugin test** (`b5f5ae4`). CI
+  race detector flagged `TestListenShutsDownOnCtxCancel` reading
+  `tp.server` from the test goroutine while `listen()` wrote it
+  concurrently. Dropped the field peek; shutdown semantic is the
+  contract, the field layout is implementation detail. Lesson
+  recorded inline.
+- **Lint S1016 on plugin List() methods** (`72c2d7a`). `hook_runtime.go`
+  and `tool_runtime.go` built plugin-side structs field-by-field from
+  manifest structs when type conversion was valid (tag-only
+  differences are conversion-legal in Go since 1.8). Replaced with
+  `HookPluginHook(h)` and `ToolPluginTool(t)`.
+
+### Dependencies
+
+- `go mod tidy` (`72c2d7a`): promoted `webpush-go` and `go-imap/v2`
+  from indirect to direct (they're imported by `internal/push` and
+  `internal/channels` respectively). No version bumps; cleanup only.
+
+### Tests
+
+- Plugin runtime, SDKs, RPCs, and CLIs collectively gained ~80 new
+  test functions across `internal/plugins`, `pkg/channelplugin`,
+  `pkg/toolplugin`, `pkg/hookplugin`, `plugins/telegram`,
+  `plugins/whatsapp`, and gateway integration suites.
+- Full CI matrix (Linux/macOS/Windows × Go 1.22/1.24) plus `-race`
+  on Linux/macOS green on tip `72c2d7a` (run 25753234773).
+
+### Deferred to v0.5.x / v0.6.0
+
+- Reference example plugins under `plugins/example-tool/` and
+  `plugins/example-hook/`. SDK contracts well-tested; examples
+  optional.
+- Hot-registration of plugin tools/hooks on runtime approval —
+  operator restarts to pick them up (matches channel-plugin posture).
+- Token verification on hook delivery direction (gateway → plugin).
+  Reserved field in the envelope; current contract doesn't send it.
+- Webhook-mode plugin migration for Telegram (Iter 2 only handled
+  polling).
+- WhatsApp plugin inbound (Meta-driven webhook; would require
+  exposing plugin endpoint publicly).
+- Voice scope B (~5-6 days) targeted for v0.6.0.
+
 ## [0.4.0] - 2026-05-12
 
 "Bidirectional + browser delivery + UI." Closes two of the explicit
