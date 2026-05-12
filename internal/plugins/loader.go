@@ -27,6 +27,24 @@ type Manifest struct {
 	// channels.Channel via the contract in docs/PLUGIN-ARCHITECTURE.md.
 	// See ChannelManifest for fields.
 	Channel *ChannelManifest `json:"channel,omitempty"`
+
+	// Hooks declares event subscriptions for this plugin. When the
+	// plugin is approved (`openclaw plugins hook approve <name>`), the
+	// gateway POSTs to each declared endpoint on the matching event,
+	// fire-and-forget per docs/PLUGIN-ARCHITECTURE.md.
+	Hooks []ManifestHook `json:"hooks,omitempty"`
+}
+
+// ManifestHook declares a single hook subscription: an event the plugin
+// wants to receive, and the HTTP endpoint to POST to when it fires.
+// Multiple entries with the same Event are allowed (a plugin can fan
+// the same event to multiple endpoints).
+type ManifestHook struct {
+	// Event is the hookstore.EventType name (e.g. "agent.run.complete").
+	Event string `json:"event"`
+	// Endpoint is the full URL the gateway POSTs the hook envelope to.
+	// Typical loopback shape: "http://127.0.0.1:9301/hook/agent".
+	Endpoint string `json:"endpoint"`
 }
 
 // ManifestRoute declares an HTTP route the plugin wants to expose via the gateway.

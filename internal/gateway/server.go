@@ -54,6 +54,7 @@ type Server struct {
 	push                  *push.Service
 	channelPlugins        *plugins.ChannelPluginRegistry
 	toolPlugins           *plugins.ToolPluginRegistry
+	hookPlugins           *plugins.HookPluginRegistry
 	logs                  *logstore.Store
 	cron                  *cronstore.Store
 	hooks                 *hookstore.Store
@@ -427,6 +428,28 @@ func (s *Server) ToolPluginRegistry() *plugins.ToolPluginRegistry {
 	defer s.authMu.RUnlock()
 	return s.toolPlugins
 }
+
+// SetHookPluginRegistry attaches the hook-plugin registry. Used by the
+// plugins.hook.* RPCs to list / approve / revoke. Safe to call after
+// Run() (writes/reads guarded by authMu).
+func (s *Server) SetHookPluginRegistry(reg *plugins.HookPluginRegistry) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	s.hookPlugins = reg
+}
+
+// HookPluginRegistry returns the configured hook-plugin registry, or
+// nil if none has been attached.
+func (s *Server) HookPluginRegistry() *plugins.HookPluginRegistry {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	return s.hookPlugins
+}
+
+// HookStore returns the gateway's hookstore so external code (e.g.
+// cmd/openclaw) can register hookstore.EventListener subscribers from
+// outside the gateway package.
+func (s *Server) HookStore() *hookstore.Store { return s.hooks }
 
 // PushService returns the configured push service, or nil if disabled.
 // Useful for tests + the new push.* RPCs.
@@ -1383,6 +1406,48 @@ func (s *Server) dispatchRPC(
 		reg := s.ToolPluginRegistry()
 		if reg == nil {
 			return nil, &rpcError{Code: -32001, Message: "tool-plugin registry not configured"}
+		}
+		var p struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.Name) == "" {
+			return nil, &rpcError{Code: -32602, Message: "name is required"}
+		}
+		if err := reg.Revoke(strings.TrimSpace(p.Name)); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"name": p.Name, "state": "pending"}, nil
+	case "plugins.hook.list":
+		reg := s.HookPluginRegistry()
+		if reg == nil {
+			return map[string]any{"plugins": []any{}}, nil
+		}
+		return map[string]any{"plugins": reg.List()}, nil
+	case "plugins.hook.approve":
+		reg := s.HookPluginRegistry()
+		if reg == nil {
+			return nil, &rpcError{Code: -32001, Message: "hook-plugin registry not configured"}
+		}
+		var p struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.Name) == "" {
+			return nil, &rpcError{Code: -32602, Message: "name is required"}
+		}
+		token, err := reg.Approve(strings.TrimSpace(p.Name))
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		// Approved hook plugins' endpoints are wired into the
+		// hookstore's listener fan-out at startup. Approving at
+		// runtime issues the token but does NOT hot-register the
+		// dispatcher — operator restarts to pick up the new endpoint
+		// (matches the channel + tool plugin postures).
+		return map[string]any{"name": p.Name, "token": token, "state": "approved"}, nil
+	case "plugins.hook.revoke":
+		reg := s.HookPluginRegistry()
+		if reg == nil {
+			return nil, &rpcError{Code: -32001, Message: "hook-plugin registry not configured"}
 		}
 		var p struct {
 			Name string `json:"name"`

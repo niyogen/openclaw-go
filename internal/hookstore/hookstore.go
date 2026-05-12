@@ -60,13 +60,24 @@ type Hook struct {
 // to prevent burst events from exhausting goroutine/connection resources.
 const maxConcurrentDispatches = 32
 
+// EventListener is the signature for side-channel subscribers attached
+// via AddListener. Listeners fire on every Emit alongside persistent
+// Hook records but live in-memory only — used by code paths (channel
+// plugins, push notifications, tool plugins, …) that need event
+// notifications without polluting the operator-visible hook list. Each
+// listener runs in its own goroutine, fire-and-forget. Listeners are
+// expected to be cheap and quick; long-running work must be deferred
+// to a goroutine inside the listener.
+type EventListener func(event EventType, payload map[string]any)
+
 // Store holds hooks and provides event dispatch.
 type Store struct {
-	mu      sync.Mutex
-	hooks   map[string]*Hook
-	path    string
-	client  *http.Client
-	dispSem chan struct{} // semaphore bounding concurrent dispatches
+	mu        sync.Mutex
+	hooks     map[string]*Hook
+	path      string
+	client    *http.Client
+	dispSem   chan struct{} // semaphore bounding concurrent dispatches
+	listeners []EventListener
 }
 
 // New opens (or creates) a hook store backed by path.
@@ -143,9 +154,36 @@ func (s *Store) ForEvent(event EventType) []Hook {
 	return out
 }
 
+// AddListener registers a non-persistent EventListener that fires on
+// every Emit alongside the persistent Hook records. Listeners run in
+// their own goroutines, fire-and-forget. Use this for plugin-hook
+// fan-out, push notifications, and other ephemeral subscribers that
+// should NOT appear in the operator's persisted hook list.
+//
+// Safe to call after the store is constructed; listeners are read
+// under the same lock that protects the hooks map.
+func (s *Store) AddListener(l EventListener) {
+	if l == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listeners = append(s.listeners, l)
+}
+
 // Emit fires hooks registered for event (fire-and-forget, bounded concurrency).
+// Listeners (added via AddListener) fan out in parallel; each runs in
+// its own goroutine, NOT subject to the dispSem semaphore (callers are
+// expected to be cheap — plugin hook listeners use their own HTTP
+// client timeouts).
 func (s *Store) Emit(event EventType, payload map[string]any) {
 	hooks := s.ForEvent(event)
+	// Snapshot listeners under the lock so the slice isn't mutated mid-iteration.
+	s.mu.Lock()
+	listeners := make([]EventListener, len(s.listeners))
+	copy(listeners, s.listeners)
+	s.mu.Unlock()
+
 	for _, h := range hooks {
 		// Go 1.22 made range-loop variables per-iteration, so the goroutine
 		// below captures this iteration's `h` safely without the prior
@@ -159,6 +197,9 @@ func (s *Store) Emit(event EventType, payload map[string]any) {
 		default:
 			// Semaphore full — drop this dispatch rather than blocking or spawning.
 		}
+	}
+	for _, l := range listeners {
+		go l(event, payload)
 	}
 }
 

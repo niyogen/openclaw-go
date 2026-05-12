@@ -743,6 +743,7 @@ func printUsage() {
 	fmt.Println("  openclaw secrets [list|set <name> <value>|delete <name>]")
 	fmt.Println("  openclaw plugins [channel list|channel approve <name>|channel revoke <name>]")
 	fmt.Println("  openclaw plugins [tool list|tool approve <name>|tool revoke <name>]")
+	fmt.Println("  openclaw plugins [hook list|hook approve <name>|hook revoke <name>]")
 	fmt.Println("  openclaw approvals")
 	fmt.Println("  openclaw approve <approval-id>")
 	fmt.Println("  openclaw reject <approval-id>")
@@ -1089,6 +1090,30 @@ func runGateway(cfg config.Config) error {
 					},
 				)
 				fmt.Printf("registered tool-plugin: %s/%s → %s\n", m.Name, tname, endpoint)
+			}
+		}
+	}
+
+	// Hook plugins: scan pluginsDir for plugin.json manifests with a
+	// hooks[] array. For approved plugins, install an EventListener on
+	// the gateway's hookstore that POSTs the design-doc envelope
+	// ({event, payload, timestamp}) to each declared endpoint on the
+	// matching event. Fire-and-forget, no retries (matches the
+	// at-most-once semantics in PLUGIN-ARCHITECTURE.md §3).
+	hookPluginsDir := pluginsDir
+	hookTokensFile := filepath.Join(dataDir, "hook-plugin-tokens.json")
+	hookReg, err := plugins.NewHookPluginRegistry(hookPluginsDir, hookTokensFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: hook-plugin registry init failed: %v (hook plugins disabled)\n", err)
+	} else {
+		server.SetHookPluginRegistry(hookReg)
+		approved := hookReg.ApprovedManifests()
+		if len(approved) > 0 {
+			server.HookStore().AddListener(plugins.NewPluginHookDispatcher(approved))
+			for _, m := range approved {
+				for _, h := range m.Hooks {
+					fmt.Printf("registered hook-plugin: %s on %s → %s\n", m.Name, h.Event, h.Endpoint)
+				}
 			}
 		}
 	}
@@ -2567,6 +2592,9 @@ func openBrowser(url string) error {
 //	openclaw plugins tool list
 //	openclaw plugins tool approve <name>
 //	openclaw plugins tool revoke <name>
+//	openclaw plugins hook list
+//	openclaw plugins hook approve <name>
+//	openclaw plugins hook revoke <name>
 //
 // Approve prints the issued bearer token ONCE — the operator copies it
 // into the plugin's OPENCLAW_PLUGIN_TOKEN env var. Subsequent approves
@@ -2617,6 +2645,26 @@ func runPluginsCLI(baseURL string, args []string) error {
 			return rpc(rpcURL, "plugins.tool.revoke", map[string]any{"name": args[2]})
 		default:
 			return fmt.Errorf("unknown plugins tool subcommand %q", args[1])
+		}
+	case "hook":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: openclaw plugins hook list|approve|revoke ...")
+		}
+		switch args[1] {
+		case "list":
+			return rpc(rpcURL, "plugins.hook.list", map[string]any{})
+		case "approve":
+			if len(args) < 3 {
+				return fmt.Errorf("usage: openclaw plugins hook approve <name>")
+			}
+			return rpc(rpcURL, "plugins.hook.approve", map[string]any{"name": args[2]})
+		case "revoke":
+			if len(args) < 3 {
+				return fmt.Errorf("usage: openclaw plugins hook revoke <name>")
+			}
+			return rpc(rpcURL, "plugins.hook.revoke", map[string]any{"name": args[2]})
+		default:
+			return fmt.Errorf("unknown plugins hook subcommand %q", args[1])
 		}
 	default:
 		return fmt.Errorf("unknown plugins subcommand %q", args[0])
