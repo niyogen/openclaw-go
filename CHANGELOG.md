@@ -7,8 +7,13 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 
 ## [Unreleased]
 
-Three feature iterations toward v0.4.0 — "bidirectional + browser delivery + UI".
-Tag when ready; commits already on the branch are `fc37bde`, `410274c`, `f60225b`.
+Nothing yet.
+
+## [0.4.0] - 2026-05-12
+
+"Bidirectional + browser delivery + UI." Closes two of the explicit
+PARITY-PLAN.md deferrals (P0.3 web-push, P1.1 IMAP inbound). Commits on
+the branch: `fc37bde`, `410274c`, `f60225b`, `7d0aa9d`, `1a4f6a3`, `1eb283a`.
 
 ### Added
 
