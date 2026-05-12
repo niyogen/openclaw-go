@@ -24,6 +24,7 @@ import (
 	"openclaw-go/internal/config"
 	"openclaw-go/internal/gateway"
 	"openclaw-go/internal/plugins"
+	"openclaw-go/internal/push"
 	"openclaw-go/internal/sandbox"
 	"openclaw-go/internal/sessions"
 )
@@ -711,6 +712,7 @@ func printUsage() {
 	fmt.Println("  openclaw configure gateway auth-token <token>")
 	fmt.Println("  openclaw configure gateway allowed-origins <csv>")
 	fmt.Println("  openclaw configure gateway metrics-require-auth <true|false>")
+	fmt.Println("  openclaw configure gateway push-contact <mailto:owner@example.com>")
 	fmt.Println("  openclaw configure set-agent-provider <echo|openai|anthropic>")
 	fmt.Println("  openclaw configure telegram inbound-mode <polling|webhook>")
 	fmt.Println("  openclaw configure telegram enable <true|false>")
@@ -1017,6 +1019,19 @@ func runGateway(cfg config.Config) error {
 
 	// Configure additional auth modes (password + trusted proxies).
 	server.SetAuth(cfg.Gateway.Password, cfg.Gateway.TrustedProxies)
+
+	// Web Push: only enabled when an operator-supplied contact is present.
+	// Push providers reject anonymous senders, so a missing contact is a
+	// hard disable rather than a silent default. First-use generates a
+	// VAPID keypair and persists it under dataDir/push-keys.json (0o600).
+	if strings.TrimSpace(cfg.Gateway.PushContact) != "" {
+		pushSvc, err := push.NewService(dataDir, strings.TrimSpace(cfg.Gateway.PushContact))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: push service init failed: %v (push disabled)\n", err)
+		} else {
+			server.SetPushService(pushSvc)
+		}
+	}
 	if cfg.Gateway.ShutdownTimeout > 0 {
 		server.SetShutdownTimeout(time.Duration(cfg.Gateway.ShutdownTimeout) * time.Second)
 	}
@@ -1776,6 +1791,12 @@ func runConfigureGateway(cfg config.Config, args []string) error {
 		}
 		fmt.Printf("gateway.metricsRequireAuth set to %v\n", v)
 		return nil
+	case "push-contact":
+		// VAPID sub claim for push providers. Typical value:
+		// "mailto:owner@example.com". Setting it to a non-empty value
+		// activates push delivery on next gateway start.
+		cfg.Gateway.PushContact = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "gateway.pushContact set to %q", cfg.Gateway.PushContact)
 	default:
 		return fmt.Errorf("unknown gateway configure command")
 	}

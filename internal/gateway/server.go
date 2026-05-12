@@ -20,6 +20,7 @@ import (
 	"openclaw-go/internal/hookstore"
 	"openclaw-go/internal/logstore"
 	"openclaw-go/internal/plugins"
+	"openclaw-go/internal/push"
 	"openclaw-go/internal/runtime"
 	"openclaw-go/internal/secretstore"
 	"openclaw-go/internal/sessions"
@@ -50,6 +51,7 @@ type Server struct {
 	registry              *plugins.Registry
 	tools                 *ToolRegistry
 	approvals             *runtime.ApprovalQueue
+	push                  *push.Service
 	logs                  *logstore.Store
 	cron                  *cronstore.Store
 	hooks                 *hookstore.Store
@@ -131,15 +133,37 @@ func New(
 	// Enqueue releases its lock, so it's safe to fire Emit (which spawns
 	// its own goroutines under a semaphore).
 	s.approvals.SetOnEnqueue(func(req runtime.ApprovalRequest) {
-		if s.hooks == nil {
-			return
+		// Hook fan-out: external systems that registered an
+		// approval.requested handler can react.
+		if s.hooks != nil {
+			s.hooks.Emit(hookstore.EventApprovalRequested, map[string]any{
+				"id":        req.ID,
+				"sessionId": req.SessionID,
+				"tool":      req.Tool,
+				"createdAt": req.CreatedAt,
+			})
 		}
-		s.hooks.Emit(hookstore.EventApprovalRequested, map[string]any{
-			"id":        req.ID,
-			"sessionId": req.SessionID,
-			"tool":      req.Tool,
-			"createdAt": req.CreatedAt,
-		})
+		// Web Push fan-out: registered browser subscriptions get a
+		// notification with the approval id so the operator can decide
+		// without polling /approvals. Fire-and-forget — push failures
+		// must not block the approval queue.
+		if ps := s.push; ps != nil {
+			payload := map[string]any{
+				"kind":      "approval.requested",
+				"id":        req.ID,
+				"sessionId": req.SessionID,
+				"tool":      req.Tool,
+				"createdAt": req.CreatedAt,
+			}
+			raw, err := json.Marshal(payload)
+			if err == nil {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_ = ps.SendAll(ctx, raw)
+				}()
+			}
+		}
 	})
 	s.rateLimiter = NewRateLimiter(120, time.Minute)
 	s.bus = NewEventBus()
@@ -347,6 +371,23 @@ func (s *Server) SetAuth(password string, trustedProxies []string) {
 	defer s.authMu.Unlock()
 	s.password = strings.TrimSpace(password)
 	s.trustedProxies = trustedProxies
+}
+
+// SetPushService attaches a Web Push service. Call this from main once the
+// service is constructed; passing nil disables push delivery (the
+// approval-onEnqueue callback no-ops). Safe to call after Run().
+func (s *Server) SetPushService(ps *push.Service) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	s.push = ps
+}
+
+// PushService returns the configured push service, or nil if disabled.
+// Useful for tests + the new push.* RPCs.
+func (s *Server) PushService() *push.Service {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	return s.push
 }
 
 // SetAuthToken replaces the bearer token. Safe to call after Run().
@@ -2543,6 +2584,82 @@ func (s *Server) dispatchRPC(
 		return s.rpcWebLoginStart(params)
 	case "web.login.wait":
 		return s.rpcWebLoginWait(ctx, params)
+
+	// ── push.* (VAPID Web Push subscription + delivery) ──────────────────
+	case "push.publicKey":
+		ps := s.PushService()
+		if ps == nil {
+			return nil, &rpcError{Code: -32001, Message: "push is not configured (set gateway.pushContact)"}
+		}
+		return map[string]any{"publicKey": ps.PublicKey()}, nil
+	case "push.web.subscribe":
+		ps := s.PushService()
+		if ps == nil {
+			return nil, &rpcError{Code: -32001, Message: "push is not configured"}
+		}
+		var p struct {
+			Endpoint string `json:"endpoint"`
+			P256dh   string `json:"p256dh"`
+			Auth     string `json:"auth"`
+			Label    string `json:"label"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		sub, err := ps.Subscribe(p.Endpoint, p.P256dh, p.Auth, p.Label)
+		if err != nil {
+			return nil, &rpcError{Code: -32602, Message: err.Error()}
+		}
+		return sub, nil
+	case "push.web.unsubscribe":
+		ps := s.PushService()
+		if ps == nil {
+			return nil, &rpcError{Code: -32001, Message: "push is not configured"}
+		}
+		var p struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "id is required"}
+		}
+		if err := ps.Unsubscribe(p.ID); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "id": p.ID}, nil
+	case "push.web.list":
+		ps := s.PushService()
+		if ps == nil {
+			return nil, &rpcError{Code: -32001, Message: "push is not configured"}
+		}
+		return ps.List(), nil
+	case "push.test":
+		ps := s.PushService()
+		if ps == nil {
+			return nil, &rpcError{Code: -32001, Message: "push is not configured"}
+		}
+		// Optional `id` param targets a single sub; absent = fan out to all.
+		var p struct {
+			ID      string `json:"id"`
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(params, &p)
+		if strings.TrimSpace(p.Message) == "" {
+			p.Message = "openclaw-go push test"
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"kind":    "push.test",
+			"message": p.Message,
+		})
+		var err error
+		if strings.TrimSpace(p.ID) != "" {
+			err = ps.SendOne(ctx, p.ID, payload)
+		} else {
+			err = ps.SendAll(ctx, payload)
+		}
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"ok": true}, nil
 
 	// ── heartbeat / presence ─────────────────────────────────────────────
 	case "last-heartbeat", "set-heartbeats":

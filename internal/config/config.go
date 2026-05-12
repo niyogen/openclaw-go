@@ -26,6 +26,10 @@ type GatewayConfig struct {
 	// or trusted proxy). When false, /metrics is public for scrapers. If no gateway
 	// auth is configured, this flag has no practical effect (requests stay authorized).
 	MetricsRequireAuth bool `json:"metricsRequireAuth"`
+	// PushContact is the RFC 8292 `sub` claim presented in VAPID JWTs —
+	// typically `mailto:owner@example.com`. Push providers (FCM, Mozilla,
+	// etc.) reject anonymous senders, so leaving this blank disables push.
+	PushContact string `json:"pushContact"`
 }
 
 type AgentConfig struct {
