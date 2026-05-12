@@ -7,7 +7,78 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 
 ## [Unreleased]
 
-Nothing yet.
+Three feature iterations toward v0.4.0 — "bidirectional + browser delivery + UI".
+Tag when ready; commits already on the branch are `fc37bde`, `410274c`, `f60225b`.
+
+### Added
+
+- **IMAP inbound for the email channel** (`fc37bde`). New
+  `EmailFetcher` interface + `EmailInboundPoller` in
+  `internal/channels/email_inbound.go`; real `IMAPFetcher` wraps
+  emersion's `go-imap/v2 imapclient`. Polls unseen messages, marks
+  them Seen, converts to InboundMessage with
+  `SessionID="email:<from>"`. Six new config fields on
+  `EmailChannelConfig` (InboundEnabled / IMAPHost / IMAPPort /
+  IMAPUseTLS / IMAPMailbox / IMAPPollSeconds). Validation refuses to
+  start with missing creds. New CLI subcommands: `configure email
+  inbound-enable | imap-host | imap-port | imap-tls | imap-mailbox
+  | imap-poll`. Tests cover poller against an in-memory fake AND
+  integration against `imapmemserver`. **Closes the P1.1 follow-up
+  deferral** for IMAP inbound.
+- **Web Push (VAPID) delivery** (`410274c`). New `internal/push/`
+  package with `Service` owning the VAPID keypair (auto-generated and
+  persisted at 0o600 on first use) and subscription store. New
+  `Sender` interface; production uses `webpush-go`'s
+  `SendNotificationWithContext`. Gateway exposes 5 new RPCs:
+  `push.publicKey`, `push.web.subscribe`, `push.web.unsubscribe`,
+  `push.web.list`, `push.test`. `ApprovalQueue.SetOnEnqueue` now
+  fan-outs an `approval.requested` push to every registered
+  subscription alongside the existing hook. New config field
+  `gateway.pushContact` (a missing value disables push). New CLI:
+  `configure gateway push-contact <mailto:...>`. **Closes the P0.3
+  deferral** for VAPID web-push.
+- **UI management panels** (`f60225b`). Three new cards in the
+  embedded Control Panel: pending-approvals list with inline Approve/
+  Reject buttons (drives `approvals.list/decide`); session-compaction
+  panel with Restore + Branch buttons (drives
+  `sessions.compaction.list/restore/branch`); push-subscriptions list
+  with per-row Remove and a "Trigger test push to all" button. Each
+  panel renders an honest "not configured" / "no entries" state
+  rather than crashing or hiding. New `esc()` helper prevents HTML
+  injection via RPC-returned content. Browser-side push subscribe
+  flow (service worker + PushManager.subscribe) deferred — operators
+  register subscriptions via the RPC directly today.
+
+### Tests
+
+- IMAP inbound: 9 unit tests + 2 integration against `imapmemserver`
+  (proves full dial→login→select→search→fetch→store-seen).
+- Push: 9 unit tests on the `push.Service` (subscribe roundtrip,
+  reload persistence, fan-out error aggregation, public-key stability)
+  + 5 gateway integration tests (each RPC end-to-end +
+  approval-Enqueue-fires-push).
+- UI: 5 new Playwright tests for the management panels + the dashboard
+  + web-login Playwright suites still green at 23 total tests, 13.2s
+  wall-clock.
+
+### Dependencies
+
+- `github.com/emersion/go-imap/v2 v2.0.0-beta.8` (+ transitive
+  go-message, go-sasl).
+- `github.com/SherClockHolmes/webpush-go v1.4.0` (+ transitive
+  golang-jwt/jwt/v5).
+- `golang.org/x/crypto` upgraded to current.
+
+All MIT/BSD-3. Single-dep policy was relaxed by maintainer earlier in
+this work cycle — see `memory/project_single_dep_policy.md`.
+
+### Fixed (post-v0.3.1)
+
+- `runDashboard` was claiming `/ui/` returns 404; reality is the
+  embedded Control Panel works. Message corrected to print an
+  auth-required hint only when a bearer token is configured.
+
+## [0.3.1] - 2026-05-12
 
 ## [0.3.1] - 2026-05-12
 
