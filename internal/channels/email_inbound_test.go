@@ -155,12 +155,22 @@ func TestPollerSurfacesHandlerErrors(t *testing.T) {
 	f := &fakeFetcher{}
 	f.enqueue([]EmailMessage{{From: "a@example.com", Body: "fail me", UID: 99}})
 
-	var seenCh string
-	var seenErr error
+	// seenCh/seenErr are written by the poller goroutine (via the observer
+	// callback) and read by the test goroutine after the deadline poll —
+	// guard them with a mutex so -race doesn't flag the cross-goroutine
+	// access. (The previous version wrote/read plain vars and tripped
+	// -race in CI.)
+	var (
+		mu      sync.Mutex
+		seenCh  string
+		seenErr error
+	)
 	cfg := &WebhookInboundConfig{
 		OnHandlerError: func(ch string, err error, _ map[string]any) {
+			mu.Lock()
 			seenCh = ch
 			seenErr = err
+			mu.Unlock()
 		},
 	}
 	failingHandler := func(_ context.Context, _ InboundMessage) error {
@@ -175,12 +185,17 @@ func TestPollerSurfacesHandlerErrors(t *testing.T) {
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if seenErr != nil {
+		mu.Lock()
+		fired := seenErr != nil
+		mu.Unlock()
+		if fired {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	if seenCh != "email" || seenErr == nil {
 		t.Fatalf("expected handler-error observer fired with channel=email; got ch=%q err=%v", seenCh, seenErr)
 	}
