@@ -66,6 +66,13 @@ type TelegramChannelConfig struct {
 	InboundMode   string `json:"inboundMode"`
 	WebhookPath   string `json:"webhookPath"`
 	WebhookSecret string `json:"webhookSecret"`
+	// UsePlugin, when true, makes the gateway skip the in-process
+	// Telegram channel and rely on the out-of-process plugin at
+	// `plugins/telegram/` for both outbound and inbound. Operator must
+	// approve the plugin (`openclaw plugins channel approve telegram`)
+	// AND launch the plugin binary separately for this to work. Default
+	// false keeps backward-compat with deployments running the built-in.
+	UsePlugin bool `json:"usePlugin"`
 }
 
 type SlackChannelConfig struct {

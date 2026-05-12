@@ -1,0 +1,9 @@
+{
+  "name": "telegram",
+  "version": "0.5.0",
+  "description": "Telegram channel plugin (polling mode) — outbound via Bot API sendMessage, inbound via getUpdates long-poll.",
+  "channel": {
+    "channel": "telegram",
+    "baseUrl": "http://127.0.0.1:9101"
+  }
+}

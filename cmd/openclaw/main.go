@@ -717,6 +717,7 @@ func printUsage() {
 	fmt.Println("  openclaw configure telegram inbound-mode <polling|webhook>")
 	fmt.Println("  openclaw configure telegram enable <true|false>")
 	fmt.Println("  openclaw configure telegram webhook set <public-base-url>")
+	fmt.Println("  openclaw configure telegram use-plugin <true|false>")
 	fmt.Println("  openclaw configure slack enable <true|false>")
 	fmt.Println("  openclaw configure slack inbound-mode <webhook>")
 	fmt.Println("  openclaw configure slack webhook-path <path>")
@@ -910,7 +911,10 @@ func runGateway(cfg config.Config) error {
 	if cfg.Channels.Webhook.Enabled {
 		channelRouter.Register(channels.NewWebhookChannel(cfg.Channels.Webhook.OutboundURL))
 	}
-	if cfg.Channels.Telegram.Enabled {
+	if cfg.Channels.Telegram.Enabled && !cfg.Channels.Telegram.UsePlugin {
+		// Built-in path. Skipped when UsePlugin=true; in that case the
+		// out-of-process Telegram plugin registers a pluginChannel with
+		// the same "telegram" name via the channel-plugin registry.
 		channelRouter.Register(channels.NewTelegramChannel(
 			cfg.Channels.Telegram.BotToken,
 			cfg.Channels.Telegram.ChatID,
@@ -1165,7 +1169,10 @@ func runGateway(cfg config.Config) error {
 
 	server.ApplyExtensionTools(cfg)
 
-	if cfg.Channels.Telegram.Enabled {
+	if cfg.Channels.Telegram.Enabled && !cfg.Channels.Telegram.UsePlugin {
+		// Built-in inbound path (polling OR webhook). Skipped when
+		// UsePlugin=true; the out-of-process plugin owns its own poller
+		// + posts inbound to /plugins/telegram/inbound directly.
 		tgObs := &channels.WebhookInboundConfig{
 			OnHandlerError: func(ch string, err error, attrs map[string]any) {
 				server.RecordInboundHandlerError(ch, err, attrs)
@@ -1903,6 +1910,18 @@ func runConfigureTelegram(cfg config.Config, args []string) error {
 		}
 		fmt.Printf("telegram webhook configured at %s\n", fullWebhookURL)
 		return nil
+	case "use-plugin":
+		// Flips Telegram between in-process (false, default) and the
+		// out-of-process plugin at `plugins/telegram/` (true). Operator
+		// must also approve the plugin and launch its binary separately
+		// — see docs/PLUGIN-ARCHITECTURE.md and the channel-plugin
+		// approval flow.
+		v, err := parseBoolArg(args[1])
+		if err != nil {
+			return err
+		}
+		cfg.Channels.Telegram.UsePlugin = v
+		return saveAndAnnounce(cfg, "channels.telegram.usePlugin set to %v", v)
 	default:
 		return fmt.Errorf("unknown telegram configure command")
 	}
