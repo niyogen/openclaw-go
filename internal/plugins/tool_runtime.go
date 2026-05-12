@@ -161,11 +161,7 @@ func (r *ToolPluginRegistry) List() []ToolPluginEntry {
 			if strings.TrimSpace(t.Name) == "" || strings.TrimSpace(t.Endpoint) == "" {
 				continue
 			}
-			tools = append(tools, ToolPluginTool{
-				Name:        t.Name,
-				Description: t.Description,
-				Endpoint:    t.Endpoint,
-			})
+			tools = append(tools, ToolPluginTool(t))
 		}
 		out = append(out, ToolPluginEntry{
 			Name:        name,

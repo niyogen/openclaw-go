@@ -142,7 +142,7 @@ func (r *HookPluginRegistry) List() []HookPluginEntry {
 			if strings.TrimSpace(h.Event) == "" || strings.TrimSpace(h.Endpoint) == "" {
 				continue
 			}
-			hooks = append(hooks, HookPluginHook{Event: h.Event, Endpoint: h.Endpoint})
+			hooks = append(hooks, HookPluginHook(h))
 		}
 		out = append(out, HookPluginEntry{
 			Name:        name,
