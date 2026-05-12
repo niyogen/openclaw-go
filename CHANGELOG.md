@@ -7,6 +7,10 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.1] - 2026-05-12
+
 Substantial parity-and-hardening pass. Phases 1-6 of the stabilize-then-parity
 plan are complete; 11 of 12 Phase-7 items shipped. Three remaining items
 (web-push, IMAP inbound, plugin implementation) are deferred with explicit
