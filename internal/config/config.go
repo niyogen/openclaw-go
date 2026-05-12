@@ -114,15 +114,53 @@ type NostrChannelConfig struct {
 	Pubkey   string `json:"pubkey"`
 }
 
+// EmailChannelConfig configures the SMTP-outbound email channel.
+// Port 465 = implicit TLS, 587 = STARTTLS. Empty Host disables the channel.
+type EmailChannelConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Host     string `json:"host"`     // e.g. "smtp.gmail.com"
+	Port     int    `json:"port"`     // 587 (STARTTLS, default) or 465 (TLS)
+	Username string `json:"username"` // SMTP AUTH user (usually the From address)
+	Password string `json:"password"` // app-password preferred over account password
+	From     string `json:"from"`     // RFC 5322 From; defaults to Username when empty
+}
+
+// SignalChannelConfig configures outbound delivery via signal-cli-rest-api.
+// The operator runs that sidecar separately; we just POST to its /v2/send.
+type SignalChannelConfig struct {
+	Enabled bool   `json:"enabled"`
+	BaseURL string `json:"baseUrl"` // e.g. "http://127.0.0.1:8080"
+	Number  string `json:"number"`  // bot's own number, "+15551234567"
+}
+
+// MatrixChannelConfig configures outbound to a Matrix homeserver via the
+// Client-Server API. Target room ids (not aliases) are passed per-message.
+type MatrixChannelConfig struct {
+	Enabled     bool   `json:"enabled"`
+	BaseURL     string `json:"baseUrl"`     // e.g. "https://matrix.example.com"
+	AccessToken string `json:"accessToken"` // bot's Matrix access token
+}
+
+// MattermostChannelConfig configures outbound to a Mattermost v4 API.
+type MattermostChannelConfig struct {
+	Enabled     bool   `json:"enabled"`
+	BaseURL     string `json:"baseUrl"`     // "https://mattermost.example.com"
+	AccessToken string `json:"accessToken"` // personal access token / bot token
+}
+
 type ChannelsConfig struct {
-	Webhook  WebhookChannelConfig  `json:"webhook"`
-	Telegram TelegramChannelConfig `json:"telegram"`
-	Slack    SlackChannelConfig    `json:"slack"`
-	Discord  DiscordChannelConfig  `json:"discord"`
-	Teams    TeamsChannelConfig    `json:"teams"`
-	WhatsApp WhatsAppChannelConfig `json:"whatsapp"`
-	Line     LineChannelConfig     `json:"line"`
-	Nostr    NostrChannelConfig    `json:"nostr"`
+	Webhook    WebhookChannelConfig    `json:"webhook"`
+	Telegram   TelegramChannelConfig   `json:"telegram"`
+	Slack      SlackChannelConfig      `json:"slack"`
+	Discord    DiscordChannelConfig    `json:"discord"`
+	Teams      TeamsChannelConfig      `json:"teams"`
+	WhatsApp   WhatsAppChannelConfig   `json:"whatsapp"`
+	Line       LineChannelConfig       `json:"line"`
+	Nostr      NostrChannelConfig      `json:"nostr"`
+	Email      EmailChannelConfig      `json:"email"`
+	Signal     SignalChannelConfig     `json:"signal"`
+	Matrix     MatrixChannelConfig     `json:"matrix"`
+	Mattermost MattermostChannelConfig `json:"mattermost"`
 }
 
 // MCPServerConfig describes an MCP server endpoint.
@@ -225,6 +263,19 @@ func Default() Config {
 				WebhookPath: "/webhooks/line",
 			},
 			Nostr: NostrChannelConfig{
+				Enabled: false,
+			},
+			Email: EmailChannelConfig{
+				Enabled: false,
+				Port:    587,
+			},
+			Signal: SignalChannelConfig{
+				Enabled: false,
+			},
+			Matrix: MatrixChannelConfig{
+				Enabled: false,
+			},
+			Mattermost: MattermostChannelConfig{
 				Enabled: false,
 			},
 		},
@@ -442,5 +493,5 @@ func Save(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFile(path, raw, 0o644)
+	return fileutil.WriteFile(path, raw, 0o600)
 }

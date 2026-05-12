@@ -233,6 +233,79 @@ func TestApprovalQueuePruning(t *testing.T) {
 	}
 }
 
+// TestApprovalQueueOnEnqueueFires verifies the new SetOnEnqueue callback —
+// the integration point that lets the gateway emit hookstore events for
+// every new approval without runtime depending on hookstore.
+func TestApprovalQueueOnEnqueueFires(t *testing.T) {
+	q := NewApprovalQueue()
+	var seen []ApprovalRequest
+	q.SetOnEnqueue(func(req ApprovalRequest) {
+		seen = append(seen, req)
+	})
+
+	for _, id := range []string{"a", "b", "c"} {
+		q.Enqueue(&ApprovalRequest{
+			ID:        id,
+			SessionID: "sess",
+			Tool:      "do_thing",
+			Status:    ApprovalPending,
+			CreatedAt: time.Now(),
+		})
+	}
+	if len(seen) != 3 {
+		t.Fatalf("got %d callbacks want 3", len(seen))
+	}
+	if seen[0].ID != "a" || seen[1].ID != "b" || seen[2].ID != "c" {
+		t.Fatalf("callback ordering: %+v", seen)
+	}
+}
+
+// TestApprovalQueueOnEnqueueClearable ensures passing nil unsubscribes.
+func TestApprovalQueueOnEnqueueClearable(t *testing.T) {
+	q := NewApprovalQueue()
+	var fires int
+	q.SetOnEnqueue(func(req ApprovalRequest) { fires++ })
+	q.Enqueue(&ApprovalRequest{ID: "x", Status: ApprovalPending, CreatedAt: time.Now()})
+	if fires != 1 {
+		t.Fatalf("first enqueue: fires=%d", fires)
+	}
+	q.SetOnEnqueue(nil)
+	q.Enqueue(&ApprovalRequest{ID: "y", Status: ApprovalPending, CreatedAt: time.Now()})
+	if fires != 1 {
+		t.Fatalf("after clear: fires=%d want 1", fires)
+	}
+}
+
+// TestApprovalQueuePrunesExpiredPending verifies that pending entries whose
+// ExpiresAt has passed are dropped from the map when List() runs, even if
+// no Wait() observer ever attached. Without this, callers who Enqueue but
+// don't Wait would leak memory until process restart.
+func TestApprovalQueuePrunesExpiredPending(t *testing.T) {
+	q := NewApprovalQueue()
+	past := time.Now().Add(-1 * time.Minute)
+	q.Enqueue(&ApprovalRequest{
+		ID:        "expired-pending",
+		Status:    ApprovalPending,
+		CreatedAt: past.Add(-time.Minute),
+		ExpiresAt: past,
+	})
+	q.Enqueue(&ApprovalRequest{
+		ID:        "still-pending",
+		Status:    ApprovalPending,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(10 * time.Minute),
+	})
+
+	list := q.List()
+	if len(list) != 1 || list[0].ID != "still-pending" {
+		t.Fatalf("List should only return non-expired pending; got %d entries: %+v", len(list), list)
+	}
+	// The expired entry must be gone from the map too — not just hidden.
+	if _, ok := q.Get("expired-pending"); ok {
+		t.Fatal("expired-pending should have been pruned from the map")
+	}
+}
+
 // TestIdGenConcurrentSafety runs many concurrent calls to idGen (via
 // InvokeToolWithPolicy requiring approval) and verifies no data race.
 // This is most useful with -race but also validates uniqueness.

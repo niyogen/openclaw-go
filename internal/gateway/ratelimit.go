@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -89,19 +90,33 @@ func (r *RateLimiter) maybePrune(now time.Time) {
 	}
 }
 
-// clientIP extracts the best available IP from a request.
-func clientIP(r *http.Request) string {
-	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); fwd != "" {
-		return strings.SplitN(fwd, ",", 2)[0]
-	}
-	if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
-		return real
-	}
+// directRemoteIP returns the immediate TCP peer's IP, ignoring any forwarding
+// headers. Use this for trust decisions (e.g. trusted-proxy auth bypass) where
+// the apparent IP must not be attacker-controlled.
+func directRemoteIP(r *http.Request) string {
 	addr := r.RemoteAddr
-	if idx := strings.LastIndex(addr, ":"); idx >= 0 {
-		return addr[:idx]
+	// net.SplitHostPort handles IPv6 (`[::1]:80`) and bare `host:port` forms.
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
 	}
 	return addr
+}
+
+// clientIP returns the best-available apparent client IP. X-Forwarded-For and
+// X-Real-IP are honored ONLY when the immediate peer is in trustedProxies —
+// otherwise both headers are attacker-controlled and we fall back to the
+// direct peer IP.
+func clientIP(r *http.Request, trustedProxies []string) string {
+	direct := directRemoteIP(r)
+	if len(trustedProxies) > 0 && isTrustedProxy(direct, trustedProxies) {
+		if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); fwd != "" {
+			return strings.TrimSpace(strings.SplitN(fwd, ",", 2)[0])
+		}
+		if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
+			return real
+		}
+	}
+	return direct
 }
 
 // withRateLimit wraps a handler to enforce per-IP rate limiting.
@@ -111,7 +126,7 @@ func (s *Server) withRateLimit(next http.HandlerFunc) http.HandlerFunc {
 		return next
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		res := s.rateLimiter.AllowWithInfo(clientIP(r))
+		res := s.rateLimiter.AllowWithInfo(clientIP(r, s.trustedProxiesSnapshot()))
 		w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", s.rateLimiter.limit))
 		w.Header().Set("X-RateLimit-Remaining", fmt.Sprintf("%d", res.remaining))
 		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", res.resetAt.Unix()))

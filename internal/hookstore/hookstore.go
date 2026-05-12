@@ -23,8 +23,18 @@ const (
 	EventMessageReceived  EventType = "message.received"
 	EventMessageSent      EventType = "message.sent"
 	EventSessionCreated   EventType = "session.created"
+	EventAgentRunStarted  EventType = "agent.run.started"
 	EventAgentRunComplete EventType = "agent.run.complete"
 	EventToolInvoked      EventType = "tool.invoked"
+	// Lifecycle: fired exactly once per gateway process. Useful for warmup
+	// hooks (preload caches, ping a deadman, etc.) and for clean teardown
+	// (flush buffers, notify monitoring).
+	EventGatewayStarted  EventType = "gateway.started"
+	EventGatewayStopping EventType = "gateway.stopping"
+	// Approval lifecycle: fired when the executor enqueues a tool-call
+	// approval request. Lets external systems surface the request via push,
+	// Slack DM, etc. without having to long-poll `approvals.list`.
+	EventApprovalRequested EventType = "approval.requested"
 )
 
 // HookType defines how the hook is dispatched.
@@ -65,7 +75,7 @@ func New(path string) (*Store, error) {
 		return nil, err
 	}
 	sem := make(chan struct{}, maxConcurrentDispatches)
-	for i := 0; i < maxConcurrentDispatches; i++ {
+	for range maxConcurrentDispatches {
 		sem <- struct{}{}
 	}
 	s := &Store{
@@ -137,7 +147,9 @@ func (s *Store) ForEvent(event EventType) []Hook {
 func (s *Store) Emit(event EventType, payload map[string]any) {
 	hooks := s.ForEvent(event)
 	for _, h := range hooks {
-		h := h
+		// Go 1.22 made range-loop variables per-iteration, so the goroutine
+		// below captures this iteration's `h` safely without the prior
+		// `h := h` shadow idiom.
 		select {
 		case <-s.dispSem:
 			go func() {
@@ -208,5 +220,5 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFile(s.path, raw, 0o644)
+	return fileutil.WriteFile(s.path, raw, 0o600)
 }

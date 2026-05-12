@@ -3,6 +3,7 @@ package channels
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -73,7 +74,7 @@ func BuildTeamsWebhookHandler(
 		}
 		if secret != "" {
 			headerSecret := strings.TrimSpace(r.Header.Get("X-OpenClaw-Webhook-Token"))
-			if headerSecret == "" || headerSecret != secret {
+			if headerSecret == "" || !hmac.Equal([]byte(headerSecret), []byte(secret)) {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}

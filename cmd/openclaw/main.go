@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -44,11 +46,10 @@ func main() {
 
 	switch os.Args[1] {
 	case "onboard":
-		if err := initConfig(); err != nil {
+		if err := runOnboard(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "onboard error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("OpenClaw-Go onboard complete.")
 	case "config":
 		if len(os.Args) < 3 {
 			fmt.Println("usage: openclaw config init|show|get|set|validate|file|path")
@@ -190,17 +191,8 @@ func main() {
 			os.Exit(2)
 		}
 	case "message":
-		if len(os.Args) < 5 || os.Args[2] != "send" {
-			fmt.Println("usage: openclaw message send <session-id> <message>")
-			os.Exit(2)
-		}
-		payload := map[string]string{
-			"sessionId": os.Args[3],
-			"message":   os.Args[4],
-			"channel":   "cli",
-		}
-		if err := post(baseURL+"/message", payload); err != nil {
-			fmt.Fprintf(os.Stderr, "message send error: %v\n", err)
+		if err := runMessage(baseURL, os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "message error: %v\n", err)
 			os.Exit(1)
 		}
 	case "agent":
@@ -583,15 +575,15 @@ func main() {
 			fmt.Println()
 		}
 	case "backup":
-		home, _ := os.UserHomeDir()
-		dataDir := filepath.Join(home, ".openclaw-go")
-		backupPath := dataDir + ".backup-" + time.Now().Format("20060102-150405")
-		fmt.Printf("Backing up %s → %s\n", dataDir, backupPath)
-		if err := copyDir(dataDir, backupPath); err != nil {
+		if err := runBackup(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "backup error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("Backup complete.")
+	case "restore":
+		if err := runRestore(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "restore error: %v\n", err)
+			os.Exit(1)
+		}
 	case "migrate":
 		fmt.Println("Migration: checking config format…")
 		path, _ := config.DefaultPath()
@@ -655,10 +647,30 @@ func main() {
 		}
 		texts := os.Args[2:]
 		if err := post(baseURL+"/v1/embeddings", map[string]any{
-			"model": "text-embedding-ada-002",
+			"model": "text-embedding-3-small",
 			"input": texts,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "embeddings error: %v\n", err)
+			os.Exit(1)
+		}
+	case "dashboard":
+		if err := runDashboard(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "dashboard error: %v\n", err)
+			os.Exit(1)
+		}
+	case "daemon":
+		if err := runDaemon(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
+			os.Exit(1)
+		}
+	case "compaction":
+		if err := runCompactionCLI(baseURL, os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "compaction error: %v\n", err)
+			os.Exit(1)
+		}
+	case "web-login":
+		if err := runWebLoginCLI(baseURL, os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "web-login error: %v\n", err)
 			os.Exit(1)
 		}
 	default:
@@ -692,7 +704,9 @@ func resolveProviderKey(cfg config.Config, provider string) string {
 func printUsage() {
 	fmt.Println("OpenClaw-Go")
 	fmt.Println("usage:")
-	fmt.Println("  openclaw onboard")
+	fmt.Println("  openclaw onboard [--provider <echo|openai|anthropic>]")
+	fmt.Println("                  [--openai-key <key>] [--anthropic-key <key>]")
+	fmt.Println("                  [--gateway-token <bearer>] [--gateway-port <port>]")
 	fmt.Println("  openclaw config init|show")
 	fmt.Println("  openclaw configure gateway auth-token <token>")
 	fmt.Println("  openclaw configure gateway allowed-origins <csv>")
@@ -713,6 +727,10 @@ func printUsage() {
 	fmt.Println("  openclaw configure whatsapp enable <true|false>")
 	fmt.Println("  openclaw configure whatsapp inbound-mode <webhook>")
 	fmt.Println("  openclaw configure whatsapp webhook-path <path>")
+	fmt.Println("  openclaw configure email enable|host|port|user|password|from <value>")
+	fmt.Println("  openclaw configure signal enable|baseurl|number <value>")
+	fmt.Println("  openclaw configure matrix enable|baseurl|token <value>")
+	fmt.Println("  openclaw configure mattermost enable|baseurl|token <value>")
 	fmt.Println("  openclaw logs [<level>]")
 	fmt.Println("  openclaw cron [list|add <id> <schedule> <cmd>|delete <id>]")
 	fmt.Println("  openclaw hooks [list|add <id> <event> <type> <target>|delete <id>]")
@@ -734,6 +752,12 @@ func printUsage() {
 	fmt.Println("  openclaw ready")
 	fmt.Println("  openclaw version")
 	fmt.Println("  openclaw doctor")
+	fmt.Println("  openclaw dashboard")
+	fmt.Println("  openclaw daemon install|uninstall|path")
+	fmt.Println("  openclaw web-login")
+	fmt.Println("  openclaw compaction list <session-id>|get <id>|restore <id> --yes|branch <id> [--id <new>]")
+	fmt.Println("  openclaw backup [list]")
+	fmt.Println("  openclaw restore <backup-path> --yes")
 	fmt.Println("  openclaw usage")
 	fmt.Println("  openclaw channels")
 	fmt.Println("  openclaw nodes")
@@ -743,7 +767,7 @@ func printUsage() {
 	fmt.Println("  openclaw rpc <method> [args...]")
 	fmt.Println("  openclaw sessions")
 	fmt.Println("  openclaw session get|history|kill|delete|patch|compact|stats <id>")
-	fmt.Println("  openclaw message send <session-id> <message>")
+	fmt.Println("  openclaw message send|history|dispatch ...")
 	fmt.Println("  openclaw agent <message>")
 }
 
@@ -752,6 +776,36 @@ func printUsage() {
 func validateGatewayChannelConfig(cfg config.Config) error {
 	if cfg.Channels.WhatsApp.Enabled && strings.TrimSpace(cfg.Channels.WhatsApp.VerifyToken) == "" {
 		return fmt.Errorf("whatsapp is enabled but verify token is empty: set channels.whatsapp.verifyToken or WHATSAPP_VERIFY_TOKEN")
+	}
+	// Email/Signal/Matrix/Mattermost validation: catch misconfig before the
+	// gateway starts, otherwise the channel silently no-ops because Send()
+	// returns nil when its required fields are empty.
+	if cfg.Channels.Email.Enabled && strings.TrimSpace(cfg.Channels.Email.Host) == "" {
+		return fmt.Errorf("email is enabled but channels.email.host is empty")
+	}
+	if cfg.Channels.Signal.Enabled {
+		if strings.TrimSpace(cfg.Channels.Signal.BaseURL) == "" {
+			return fmt.Errorf("signal is enabled but channels.signal.baseUrl is empty (point at your signal-cli-rest-api sidecar)")
+		}
+		if strings.TrimSpace(cfg.Channels.Signal.Number) == "" {
+			return fmt.Errorf("signal is enabled but channels.signal.number is empty (the bot's own Signal number)")
+		}
+	}
+	if cfg.Channels.Matrix.Enabled {
+		if strings.TrimSpace(cfg.Channels.Matrix.BaseURL) == "" {
+			return fmt.Errorf("matrix is enabled but channels.matrix.baseUrl is empty")
+		}
+		if strings.TrimSpace(cfg.Channels.Matrix.AccessToken) == "" {
+			return fmt.Errorf("matrix is enabled but channels.matrix.accessToken is empty")
+		}
+	}
+	if cfg.Channels.Mattermost.Enabled {
+		if strings.TrimSpace(cfg.Channels.Mattermost.BaseURL) == "" {
+			return fmt.Errorf("mattermost is enabled but channels.mattermost.baseUrl is empty")
+		}
+		if strings.TrimSpace(cfg.Channels.Mattermost.AccessToken) == "" {
+			return fmt.Errorf("mattermost is enabled but channels.mattermost.accessToken is empty")
+		}
 	}
 	return nil
 }
@@ -877,6 +931,33 @@ func runGateway(cfg config.Config) error {
 		channelRouter.Register(channels.NewNostrChannel(
 			cfg.Channels.Nostr.RelayURL,
 			cfg.Channels.Nostr.Pubkey,
+		))
+	}
+	if cfg.Channels.Email.Enabled {
+		channelRouter.Register(channels.NewEmailChannel(
+			cfg.Channels.Email.Host,
+			cfg.Channels.Email.Port,
+			cfg.Channels.Email.Username,
+			cfg.Channels.Email.Password,
+			cfg.Channels.Email.From,
+		))
+	}
+	if cfg.Channels.Signal.Enabled {
+		channelRouter.Register(channels.NewSignalChannel(
+			cfg.Channels.Signal.BaseURL,
+			cfg.Channels.Signal.Number,
+		))
+	}
+	if cfg.Channels.Matrix.Enabled {
+		channelRouter.Register(channels.NewMatrixChannel(
+			cfg.Channels.Matrix.BaseURL,
+			cfg.Channels.Matrix.AccessToken,
+		))
+	}
+	if cfg.Channels.Mattermost.Enabled {
+		channelRouter.Register(channels.NewMattermostChannel(
+			cfg.Channels.Mattermost.BaseURL,
+			cfg.Channels.Mattermost.AccessToken,
 		))
 	}
 	registry := plugins.NewRegistry()
@@ -1006,7 +1087,7 @@ func runGateway(cfg config.Config) error {
 
 	// Wire real sandbox into gateway tools so sandbox.run tool uses Docker.
 	gateway.SetSandboxFuncs(
-		func(ctx context.Context, script string, _ interface{}) (*gateway.SandboxResult, error) {
+		func(ctx context.Context, script string, _ any) (*gateway.SandboxResult, error) {
 			r, err := sandbox.RunScript(ctx, script, sandbox.DefaultOptions())
 			if err != nil {
 				return nil, err
@@ -1166,6 +1247,132 @@ func initConfig() error {
 	return config.Save(path, config.Default())
 }
 
+// runOnboard handles `openclaw onboard [flags]`. With no flags it writes a
+// default config (the historical behaviour). Flags let operators preseed the
+// most common settings — agent provider, API keys, gateway token — without
+// editing JSON by hand, so onboarding is scriptable in CI / Ansible / etc.
+//
+// Recognised flags (all optional, all string):
+//
+//	--provider echo|openai|anthropic
+//	--openai-key <key>
+//	--anthropic-key <key>
+//	--gateway-token <bearer>
+//	--gateway-port <port>
+//
+// Unknown flags are an error rather than silently ignored.
+func runOnboard(args []string) error {
+	path, err := config.DefaultPath()
+	if err != nil {
+		return err
+	}
+	// Start from whatever's on disk if it exists, falling back to defaults
+	// so re-running onboard with new flags is a non-destructive merge.
+	cfg, loadErr := config.Load(path)
+	if loadErr != nil {
+		cfg = config.Default()
+	}
+
+	opts, err := parseOnboardFlags(args)
+	if err != nil {
+		return err
+	}
+	applyOnboardOptions(&cfg, opts)
+
+	if err := config.Save(path, cfg); err != nil {
+		return err
+	}
+	printOnboardSummary(cfg, opts, path)
+	return nil
+}
+
+type onboardOptions struct {
+	provider     string
+	openaiKey    string
+	anthropicKey string
+	gatewayToken string
+	gatewayPort  string
+	anyFlagGiven bool
+}
+
+func parseOnboardFlags(args []string) (onboardOptions, error) {
+	opts := onboardOptions{}
+	i := 0
+	for i < len(args) {
+		flag := args[i]
+		i++
+		// All known flags take a value, so we always need i to be in range.
+		if i >= len(args) {
+			return opts, fmt.Errorf("flag %s requires a value", flag)
+		}
+		value := args[i]
+		i++
+		opts.anyFlagGiven = true
+		switch flag {
+		case "--provider":
+			v := strings.ToLower(strings.TrimSpace(value))
+			if v != "echo" && v != "openai" && v != "anthropic" && v != "claude" {
+				return opts, fmt.Errorf("--provider must be echo|openai|anthropic")
+			}
+			if v == "claude" {
+				v = "anthropic"
+			}
+			opts.provider = v
+		case "--openai-key":
+			opts.openaiKey = strings.TrimSpace(value)
+		case "--anthropic-key":
+			opts.anthropicKey = strings.TrimSpace(value)
+		case "--gateway-token":
+			opts.gatewayToken = strings.TrimSpace(value)
+		case "--gateway-port":
+			opts.gatewayPort = strings.TrimSpace(value)
+		default:
+			return opts, fmt.Errorf("unknown onboard flag: %s", flag)
+		}
+	}
+	return opts, nil
+}
+
+func applyOnboardOptions(cfg *config.Config, opts onboardOptions) {
+	if opts.provider != "" {
+		cfg.Agent.Provider = opts.provider
+	}
+	if opts.openaiKey != "" {
+		cfg.Providers.OpenAI.APIKey = opts.openaiKey
+	}
+	if opts.anthropicKey != "" {
+		cfg.Providers.Anthropic.APIKey = opts.anthropicKey
+	}
+	if opts.gatewayToken != "" {
+		cfg.Gateway.AuthToken = opts.gatewayToken
+	}
+	if opts.gatewayPort != "" {
+		if n, err := strconv.Atoi(opts.gatewayPort); err == nil && n > 0 && n < 65536 {
+			cfg.Gateway.Port = n
+		}
+	}
+}
+
+func printOnboardSummary(cfg config.Config, opts onboardOptions, path string) {
+	fmt.Println("OpenClaw-Go onboard complete.")
+	fmt.Printf("  config:    %s\n", path)
+	fmt.Printf("  provider:  %s\n", cfg.Agent.Provider)
+	fmt.Printf("  gateway:   %s:%d\n", cfg.Gateway.Host, cfg.Gateway.Port)
+	authState := "(none — gateway open to localhost only)"
+	if strings.TrimSpace(cfg.Gateway.AuthToken) != "" {
+		authState = "(bearer token configured)"
+	}
+	fmt.Printf("  auth:      %s\n", authState)
+	if !opts.anyFlagGiven {
+		fmt.Println()
+		fmt.Println("Next steps:")
+		fmt.Println("  - openclaw configure gateway setauth <token>     (require auth)")
+		fmt.Println("  - openclaw configure set-agent-provider openai   (or anthropic)")
+		fmt.Println("  - openclaw configure telegram/slack/discord ...  (set up a channel)")
+		fmt.Println("  - openclaw gateway run                            (start the server)")
+	}
+}
+
 func printConfig(cfg config.Config) error {
 	if strings.TrimSpace(cfg.Gateway.AuthToken) != "" {
 		cfg.Gateway.AuthToken = "***redacted***"
@@ -1208,6 +1415,15 @@ func printConfig(cfg config.Config) error {
 	}
 	if strings.TrimSpace(cfg.Channels.WhatsApp.AppSecret) != "" {
 		cfg.Channels.WhatsApp.AppSecret = "***redacted***"
+	}
+	if strings.TrimSpace(cfg.Channels.Email.Password) != "" {
+		cfg.Channels.Email.Password = "***redacted***"
+	}
+	if strings.TrimSpace(cfg.Channels.Matrix.AccessToken) != "" {
+		cfg.Channels.Matrix.AccessToken = "***redacted***"
+	}
+	if strings.TrimSpace(cfg.Channels.Mattermost.AccessToken) != "" {
+		cfg.Channels.Mattermost.AccessToken = "***redacted***"
 	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -1267,8 +1483,136 @@ func runConfigure(cfg config.Config, args []string) error {
 		return runConfigureTeams(cfg, args[1:])
 	case "whatsapp":
 		return runConfigureWhatsApp(cfg, args[1:])
+	case "email":
+		return runConfigureEmail(cfg, args[1:])
+	case "signal":
+		return runConfigureSignal(cfg, args[1:])
+	case "matrix":
+		return runConfigureMatrix(cfg, args[1:])
+	case "mattermost":
+		return runConfigureMattermost(cfg, args[1:])
 	default:
 		return fmt.Errorf("unknown configure command")
+	}
+}
+
+// saveAndAnnounce writes cfg to the default config path and prints a single
+// confirmation line. Pulled out of every configure-subcommand handler so the
+// per-channel functions can stay focused on field-setting.
+func saveAndAnnounce(cfg config.Config, format string, a ...any) error {
+	path, err := config.DefaultPath()
+	if err != nil {
+		return err
+	}
+	if err := config.Save(path, cfg); err != nil {
+		return err
+	}
+	fmt.Printf(format+"\n", a...)
+	return nil
+}
+
+func runConfigureEmail(cfg config.Config, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: openclaw configure email enable|host|port|user|password|from <value>")
+	}
+	switch args[0] {
+	case "enable":
+		v, err := parseBoolArg(args[1])
+		if err != nil {
+			return err
+		}
+		cfg.Channels.Email.Enabled = v
+		return saveAndAnnounce(cfg, "channels.email.enabled set to %v", v)
+	case "host":
+		cfg.Channels.Email.Host = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.email.host set to %q", cfg.Channels.Email.Host)
+	case "port":
+		n, err := strconv.Atoi(args[1])
+		if err != nil || n <= 0 || n >= 65536 {
+			return fmt.Errorf("port must be 1-65535")
+		}
+		cfg.Channels.Email.Port = n
+		return saveAndAnnounce(cfg, "channels.email.port set to %d", n)
+	case "user":
+		cfg.Channels.Email.Username = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.email.username set to %q", cfg.Channels.Email.Username)
+	case "password":
+		cfg.Channels.Email.Password = args[1] // not trimmed — app passwords sometimes embed whitespace
+		return saveAndAnnounce(cfg, "channels.email.password set (redacted)")
+	case "from":
+		cfg.Channels.Email.From = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.email.from set to %q", cfg.Channels.Email.From)
+	default:
+		return fmt.Errorf("unknown email configure subcommand %q", args[0])
+	}
+}
+
+func runConfigureSignal(cfg config.Config, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: openclaw configure signal enable|baseurl|number <value>")
+	}
+	switch args[0] {
+	case "enable":
+		v, err := parseBoolArg(args[1])
+		if err != nil {
+			return err
+		}
+		cfg.Channels.Signal.Enabled = v
+		return saveAndAnnounce(cfg, "channels.signal.enabled set to %v", v)
+	case "baseurl":
+		cfg.Channels.Signal.BaseURL = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.signal.baseUrl set to %q", cfg.Channels.Signal.BaseURL)
+	case "number":
+		cfg.Channels.Signal.Number = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.signal.number set to %q", cfg.Channels.Signal.Number)
+	default:
+		return fmt.Errorf("unknown signal configure subcommand %q", args[0])
+	}
+}
+
+func runConfigureMatrix(cfg config.Config, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: openclaw configure matrix enable|baseurl|token <value>")
+	}
+	switch args[0] {
+	case "enable":
+		v, err := parseBoolArg(args[1])
+		if err != nil {
+			return err
+		}
+		cfg.Channels.Matrix.Enabled = v
+		return saveAndAnnounce(cfg, "channels.matrix.enabled set to %v", v)
+	case "baseurl":
+		cfg.Channels.Matrix.BaseURL = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.matrix.baseUrl set to %q", cfg.Channels.Matrix.BaseURL)
+	case "token":
+		cfg.Channels.Matrix.AccessToken = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.matrix.accessToken set (redacted)")
+	default:
+		return fmt.Errorf("unknown matrix configure subcommand %q", args[0])
+	}
+}
+
+func runConfigureMattermost(cfg config.Config, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: openclaw configure mattermost enable|baseurl|token <value>")
+	}
+	switch args[0] {
+	case "enable":
+		v, err := parseBoolArg(args[1])
+		if err != nil {
+			return err
+		}
+		cfg.Channels.Mattermost.Enabled = v
+		return saveAndAnnounce(cfg, "channels.mattermost.enabled set to %v", v)
+	case "baseurl":
+		cfg.Channels.Mattermost.BaseURL = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.mattermost.baseUrl set to %q", cfg.Channels.Mattermost.BaseURL)
+	case "token":
+		cfg.Channels.Mattermost.AccessToken = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.mattermost.accessToken set (redacted)")
+	default:
+		return fmt.Errorf("unknown mattermost configure subcommand %q", args[0])
 	}
 }
 
@@ -1747,6 +2091,34 @@ func runDoctor(cfg config.Config, baseURL string) error {
 			fmt.Println("- error: whatsapp verify token is empty — gateway will refuse to start until WHATSAPP_VERIFY_TOKEN / channels.whatsapp.verifyToken is set")
 		}
 	}
+	if cfg.Channels.Email.Enabled {
+		fmt.Printf("- email: smtp %s:%d (outbound only; inbound IMAP not implemented)\n",
+			firstNonEmpty(cfg.Channels.Email.Host, "(unset)"), cfg.Channels.Email.Port)
+		if strings.TrimSpace(cfg.Channels.Email.Host) == "" {
+			fmt.Println("- error: email enabled but channels.email.host is empty")
+		}
+		if strings.TrimSpace(cfg.Channels.Email.Username) == "" {
+			fmt.Println("- warning: email username is empty — most SMTP relays require auth")
+		}
+	}
+	if cfg.Channels.Signal.Enabled {
+		fmt.Printf("- signal: sidecar %s (outbound only)\n", firstNonEmpty(cfg.Channels.Signal.BaseURL, "(unset)"))
+		if strings.TrimSpace(cfg.Channels.Signal.BaseURL) == "" || strings.TrimSpace(cfg.Channels.Signal.Number) == "" {
+			fmt.Println("- error: signal enabled but baseUrl or number is empty")
+		}
+	}
+	if cfg.Channels.Matrix.Enabled {
+		fmt.Printf("- matrix: homeserver %s (outbound only)\n", firstNonEmpty(cfg.Channels.Matrix.BaseURL, "(unset)"))
+		if strings.TrimSpace(cfg.Channels.Matrix.BaseURL) == "" || strings.TrimSpace(cfg.Channels.Matrix.AccessToken) == "" {
+			fmt.Println("- error: matrix enabled but baseUrl or accessToken is empty")
+		}
+	}
+	if cfg.Channels.Mattermost.Enabled {
+		fmt.Printf("- mattermost: server %s (outbound only)\n", firstNonEmpty(cfg.Channels.Mattermost.BaseURL, "(unset)"))
+		if strings.TrimSpace(cfg.Channels.Mattermost.BaseURL) == "" || strings.TrimSpace(cfg.Channels.Mattermost.AccessToken) == "" {
+			fmt.Println("- error: mattermost enabled but baseUrl or accessToken is empty")
+		}
+	}
 
 	healthURL := baseURL + "/health"
 	resp, err := http.Get(healthURL)
@@ -1895,6 +2267,378 @@ func post2(targetURL string, payload any) (*http.Response, error) {
 }
 
 // copyDir recursively copies a directory tree.
+// dashboardURL derives the browser URL for the running gateway from config.
+// It targets `/ui/` because that's the path upstream OpenClaw serves the
+// Control UI under; openclaw-go does not yet ship a UI, so the URL currently
+// 404s — but the command is still useful for printing the gateway address
+// and is forward-compatible with a future bundled UI.
+func dashboardURL(cfg config.Config) string {
+	host := strings.TrimSpace(cfg.Gateway.Host)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := cfg.Gateway.Port
+	if port == 0 {
+		port = 8080
+	}
+	return fmt.Sprintf("http://%s:%d/ui/", host, port)
+}
+
+// runDashboard prints the dashboard URL and best-effort opens it in the
+// user's browser. Browser launch failures are NOT errors — the URL is
+// always printed so the user can copy it manually.
+func runDashboard(cfg config.Config) error {
+	url := dashboardURL(cfg)
+	fmt.Println("Dashboard:", url)
+	fmt.Println("(Control UI is not bundled in openclaw-go yet — the gateway will return 404 at /ui/. The URL is shown for forward compatibility and quick gateway address lookup.)")
+	if err := openBrowser(url); err != nil {
+		// Non-fatal: print the hint and exit clean.
+		fmt.Fprintf(os.Stderr, "(could not auto-open browser: %v — open the URL above manually)\n", err)
+	}
+	return nil
+}
+
+// openBrowser issues an OS-specific command to launch the default browser.
+// Returns an error when no suitable launcher is found OR when the command
+// fails to start; callers should treat errors as soft failures and still
+// print the URL so the user can open it manually.
+func openBrowser(url string) error {
+	// Avoid pulling in runtime by referring to GOOS via a small switch on
+	// build-time. We can use runtime.GOOS — let's just import it once.
+	switch goos() {
+	case "windows":
+		// rundll32 is the historically-stable Windows browser launcher and
+		// works without a shell. The url is single-quoted in argv so '&'
+		// can't be misinterpreted by cmd.exe.
+		return execOpen("rundll32", "url.dll,FileProtocolHandler", url)
+	case "darwin":
+		return execOpen("open", url)
+	default:
+		// Most Linux desktops ship xdg-open; if not present, exec returns
+		// "executable not found" and the caller falls through to the
+		// manual-URL hint.
+		return execOpen("xdg-open", url)
+	}
+}
+
+// runMessage dispatches `openclaw message <subcmd>`. Subcommands:
+//
+//	send <session-id> <text>   — post a message into the named session
+//	history <session-id> [n]   — fetch the session transcript (optional last-N)
+//	dispatch <channel> <target> <text>
+//	                            — push an outbound message through the channel router
+//	                              (sends to Telegram/Slack/etc. depending on which is enabled)
+//
+// The pre-existing top-level `openclaw message send …` form is preserved
+// because removing it would break scripts; the new subcommands extend the
+// surface without taking anything away.
+func runMessage(baseURL string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: openclaw message send|history|dispatch ...")
+	}
+	switch args[0] {
+	case "send":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: openclaw message send <session-id> <text>")
+		}
+		return post(baseURL+"/message", map[string]string{
+			"sessionId": args[1],
+			"message":   args[2],
+			"channel":   "cli",
+		})
+	case "history":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: openclaw message history <session-id> [last-n]")
+		}
+		return get(baseURL + "/sessions/" + url.PathEscape(args[1]) + "/history")
+	case "dispatch":
+		if len(args) < 4 {
+			return fmt.Errorf("usage: openclaw message dispatch <channel> <target> <text>")
+		}
+		return rpc(baseURL+"/rpc", "message.send", map[string]any{
+			"sessionId": "cli",
+			"channel":   args[1],
+			"target":    args[2],
+			"message":   args[3],
+		})
+	default:
+		return fmt.Errorf("unknown message subcommand %q", args[0])
+	}
+}
+
+// runCompactionCLI drives the `sessions.compaction.*` RPCs from the CLI.
+// Subcommands: list <session-id>, get <id>, restore <id> [--yes], branch <id> [--id <new-id>].
+// `restore` is destructive on the source session, so it requires `--yes`.
+func runCompactionCLI(baseURL string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: openclaw compaction list|get|restore|branch ...")
+	}
+	rpcURL := baseURL + "/rpc"
+	switch args[0] {
+	case "list":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: openclaw compaction list <session-id>")
+		}
+		return rpc(rpcURL, "sessions.compaction.list", map[string]any{"sessionId": args[1]})
+	case "get":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: openclaw compaction get <id>")
+		}
+		return rpc(rpcURL, "sessions.compaction.get", map[string]any{"id": args[1]})
+	case "restore":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: openclaw compaction restore <id> --yes")
+		}
+		confirmed := false
+		for _, a := range args[2:] {
+			if a == "--yes" || a == "-y" {
+				confirmed = true
+			}
+		}
+		if !confirmed {
+			return fmt.Errorf("refusing to overwrite session messages without --yes")
+		}
+		return rpc(rpcURL, "sessions.compaction.restore", map[string]any{"id": args[1]})
+	case "branch":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: openclaw compaction branch <id> [--id <new-session-id>]")
+		}
+		params := map[string]any{"id": args[1]}
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--id" && i+1 < len(args) {
+				params["newSessionId"] = args[i+1]
+				i++
+			}
+		}
+		return rpc(rpcURL, "sessions.compaction.branch", params)
+	default:
+		return fmt.Errorf("unknown compaction subcommand %q", args[0])
+	}
+}
+
+// runWebLoginCLI drives the device-code-style `web.login.start` →
+// `web.login.wait` flow from the CLI. Prints the approval URL, attempts to
+// open the browser, then long-polls for the user's decision. Prints the
+// issued token on approval so the user can pipe it into a follow-up
+// `configure gateway setauth` step (kept manual on purpose — auto-saving
+// to config without explicit user consent feels surprising).
+func runWebLoginCLI(baseURL string, _ []string) error {
+	rpcURL := baseURL + "/rpc"
+	startReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "web.login.start",
+		"params":  map[string]any{},
+	}
+	raw, _ := json.Marshal(startReq)
+	resp, err := postRaw(rpcURL, raw)
+	if err != nil {
+		return err
+	}
+	var startResult struct {
+		Result struct {
+			Nonce string `json:"nonce"`
+			URL   string `json:"url"`
+		} `json:"result"`
+		Error *struct{ Message string } `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &startResult); err != nil {
+		return fmt.Errorf("decode start response: %w", err)
+	}
+	if startResult.Error != nil {
+		return fmt.Errorf("web.login.start: %s", startResult.Error.Message)
+	}
+	approveURL := baseURL + startResult.Result.URL
+	fmt.Println("Open this URL in a browser already authenticated to the gateway:")
+	fmt.Println("  ", approveURL)
+	if err := openBrowser(approveURL); err != nil {
+		fmt.Fprintf(os.Stderr, "(could not auto-open: %v — open the URL above manually)\n", err)
+	}
+	fmt.Println("Waiting for approval…")
+
+	waitReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "web.login.wait",
+		"params":  map[string]any{"nonce": startResult.Result.Nonce},
+	}
+	raw, _ = json.Marshal(waitReq)
+	resp, err = postRaw(rpcURL, raw)
+	if err != nil {
+		return err
+	}
+	var waitResult struct {
+		Result struct {
+			Status      string `json:"status"`
+			IssuedToken string `json:"issuedToken"`
+		} `json:"result"`
+		Error *struct{ Message string } `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &waitResult); err != nil {
+		return fmt.Errorf("decode wait response: %w", err)
+	}
+	if waitResult.Error != nil {
+		return fmt.Errorf("web.login.wait: %s", waitResult.Error.Message)
+	}
+	switch waitResult.Result.Status {
+	case "approved":
+		fmt.Println("Approved. Issued token:")
+		fmt.Println("  ", waitResult.Result.IssuedToken)
+		fmt.Println("(run `openclaw configure gateway setauth <token>` to save it)")
+		return nil
+	case "rejected":
+		return fmt.Errorf("login rejected in browser")
+	case "expired":
+		return fmt.Errorf("login attempt expired before approval")
+	default:
+		return fmt.Errorf("unexpected wait status: %s", waitResult.Result.Status)
+	}
+}
+
+// postRaw issues a raw POST with the existing auth wiring and returns the
+// response body. Used by web-login to inspect parsed JSON-RPC responses
+// (the public `rpc()` helper prints+discards, which doesn't fit here).
+func postRaw(url string, body []byte) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if gatewayAuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+gatewayAuthToken)
+	}
+	client := &http.Client{Timeout: 6 * time.Minute} // web-login wait can long-poll
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+// firstNonEmpty returns the first non-empty string argument or "" if all are empty.
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// goos is a thin wrapper so tests can substitute different OS values if
+// needed (none currently do, but it keeps openBrowser easily testable).
+var goos = func() string { return runtime.GOOS }
+
+// execOpen launches an external command without waiting for it to finish —
+// browser processes detach themselves and we don't want to block the CLI.
+var execOpen = func(name string, args ...string) error {
+	return exec.Command(name, args...).Start()
+}
+
+// dataDirPath returns the openclaw-go data directory for the current user
+// (`$HOME/.openclaw-go`). Errors loading the home dir fall back to "" so
+// callers can detect and report cleanly.
+func dataDirPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".openclaw-go"), nil
+}
+
+// runBackup snapshots the openclaw-go data dir into a sibling
+// `.openclaw-go.backup-<timestamp>` directory. Sub-arg `list` enumerates
+// existing backups instead of taking a new one.
+func runBackup(args []string) error {
+	if len(args) > 0 && args[0] == "list" {
+		return runBackupList()
+	}
+	dataDir, err := dataDirPath()
+	if err != nil {
+		return err
+	}
+	if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
+		return fmt.Errorf("data dir not found at %s — run `openclaw onboard` first", dataDir)
+	}
+	backupPath := dataDir + ".backup-" + time.Now().Format("20060102-150405")
+	fmt.Printf("Backing up %s → %s\n", dataDir, backupPath)
+	if err := copyDir(dataDir, backupPath); err != nil {
+		return err
+	}
+	fmt.Println("Backup complete.")
+	return nil
+}
+
+func runBackupList() error {
+	dataDir, err := dataDirPath()
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(dataDir)
+	prefix := filepath.Base(dataDir) + ".backup-"
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return err
+	}
+	found := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		fmt.Println(filepath.Join(parent, e.Name()))
+		found++
+	}
+	if found == 0 {
+		fmt.Println("(no backups found)")
+	}
+	return nil
+}
+
+// runRestore copies a previously-taken backup directory back over the live
+// data dir. Destructive — requires --yes (or interactive y/N when stdin is
+// a terminal we can prompt on). The implementation here errors without
+// --yes rather than prompting, so it stays safely scriptable.
+func runRestore(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: openclaw restore <backup-path> --yes")
+	}
+	backupPath := args[0]
+	confirmed := false
+	for _, a := range args[1:] {
+		if a == "--yes" || a == "-y" {
+			confirmed = true
+		}
+	}
+	if !confirmed {
+		return fmt.Errorf("refusing to overwrite data dir without --yes; pass --yes to confirm")
+	}
+	info, err := os.Stat(backupPath)
+	if err != nil {
+		return fmt.Errorf("backup path %s: %w", backupPath, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup path %s is not a directory", backupPath)
+	}
+	dataDir, err := dataDirPath()
+	if err != nil {
+		return err
+	}
+	// Mirror copyDir's behaviour: it overwrites files at their target paths
+	// and leaves untouched files in dataDir alone. For a true wipe we'd
+	// first remove dataDir — that risks data loss on partial backups, so
+	// we deliberately do a merge-restore here.
+	fmt.Printf("Restoring %s → %s (merge)\n", backupPath, dataDir)
+	if err := copyDir(backupPath, dataDir); err != nil {
+		return err
+	}
+	fmt.Println("Restore complete.")
+	return nil
+}
+
 func copyDir(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

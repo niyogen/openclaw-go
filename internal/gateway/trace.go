@@ -54,7 +54,7 @@ func (s *Server) withTrace(next http.Handler) http.Handler {
 		start := time.Now()
 		_ = s.logs.Append("debug", "trace", fmt.Sprintf("→ %s %s", r.Method, r.URL.Path), map[string]any{
 			"requestId": id,
-			"remote":    clientIP(r),
+			"remote":    clientIP(r, s.trustedProxiesSnapshot()),
 		})
 
 		rw := &statusRecorder{ResponseWriter: w, status: 200}

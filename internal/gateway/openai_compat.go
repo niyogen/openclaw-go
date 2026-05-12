@@ -92,7 +92,7 @@ func (s *Server) handleV1Responses(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if req.Stream {
-		s.handleV1ChatStream(w, ctx, model, req.Input, turn)
+		s.handleV1ChatStream(w, ctx, model, turn)
 		return
 	}
 	reply, err := s.globalRunner().GenerateReply(ctx, turn)
@@ -159,14 +159,24 @@ func (s *Server) handleV1Embeddings(w http.ResponseWriter, r *http.Request) {
 	}
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		model = "text-embedding-ada-002"
+		model = "text-embedding-3-small"
 	}
 
-	// Generate a deterministic placeholder embedding (256 dims) for each input.
-	// Replace with real provider call when an embedding runner is added.
+	// Prefer a real provider embedding if the active runner implements the
+	// Embedder interface AND returns a non-empty result. Any error (network,
+	// auth, parse) falls through to the pseudo embedding so the endpoint
+	// stays available — failing here would surprise SDK clients that expect
+	// embeddings to always succeed.
+	vectors := tryProviderEmbedding(r.Context(), s.globalRunner(), model, req.Input)
+
 	data := make([]map[string]any, 0, len(req.Input))
 	for i, text := range req.Input {
-		embedding := pseudoEmbedding(text, 256)
+		var embedding []float64
+		if vectors != nil && i < len(vectors) && len(vectors[i]) > 0 {
+			embedding = vectors[i]
+		} else {
+			embedding = pseudoEmbedding(text, 256)
+		}
 		data = append(data, map[string]any{
 			"object":    "embedding",
 			"index":     i,
@@ -183,6 +193,21 @@ func (s *Server) handleV1Embeddings(w http.ResponseWriter, r *http.Request) {
 		"model":  model,
 		"usage":  map[string]int{"prompt_tokens": totalTokens, "total_tokens": totalTokens},
 	})
+}
+
+// tryProviderEmbedding asks the runner for real embeddings if it implements
+// the agents.Embedder interface. Returns nil on any failure so the caller
+// can fall back to the pseudo path without altering the response shape.
+func tryProviderEmbedding(ctx context.Context, runner agents.Runner, model string, inputs []string) [][]float64 {
+	emb, ok := runner.(agents.Embedder)
+	if !ok {
+		return nil
+	}
+	vectors, err := emb.Embed(ctx, model, inputs)
+	if err != nil {
+		return nil
+	}
+	return vectors
 }
 
 // pseudoEmbedding returns a deterministic float32 slice of length dims
@@ -328,10 +353,10 @@ func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request)
 	defer cancel()
 
 	if req.Stream {
-		s.handleV1ChatStream(w, ctx, model, currentMsg, turn)
+		s.handleV1ChatStream(w, ctx, model, turn)
 		return
 	}
-	s.handleV1ChatBlocking(w, ctx, model, currentMsg, turn)
+	s.handleV1ChatBlocking(w, ctx, model, turn)
 }
 
 // countTokensApprox counts whitespace-delimited words across the full turn
@@ -347,7 +372,7 @@ func countTokensApprox(turn agents.Turn) int {
 func (s *Server) handleV1ChatBlocking(
 	w http.ResponseWriter,
 	ctx context.Context,
-	model, prompt string,
+	model string,
 	turn agents.Turn,
 ) {
 	reply, err := s.globalRunner().GenerateReply(ctx, turn)
@@ -382,7 +407,7 @@ func (s *Server) handleV1ChatBlocking(
 func (s *Server) handleV1ChatStream(
 	w http.ResponseWriter,
 	ctx context.Context,
-	model, prompt string,
+	model string,
 	turn agents.Turn,
 ) {
 	flusher, ok := w.(http.Flusher)

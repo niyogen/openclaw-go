@@ -76,6 +76,11 @@ type Store struct {
 	// the oldest messages if count exceeds memoryCompactAfter.
 	memoryCompactAfter int
 	memoryInlineTrim   bool
+	// Compaction history: every explicit Compact() records a snapshot here so
+	// users can list/get/restore/branch past compactions. Inline memory trim
+	// does NOT record (it would snapshot on every message append).
+	compactions     map[string]*CompactionRecord
+	compactionsPath string
 }
 
 func New(path string) (*Store, error) {
@@ -83,10 +88,15 @@ func New(path string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{
-		path:     path,
-		sessions: map[string]*Session{},
+		path:            path,
+		sessions:        map[string]*Session{},
+		compactions:     map[string]*CompactionRecord{},
+		compactionsPath: path + ".compactions.json",
 	}
 	if err := s.load(); err != nil {
+		return nil, err
+	}
+	if err := s.loadCompactions(); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -336,6 +346,10 @@ func (s *Store) Cleanup(maxAge time.Duration) (int, error) {
 
 // Compact removes messages older than keepN from the start of the session.
 // If keepN >= len(messages) nothing is removed.  Returns number removed.
+//
+// When something is actually trimmed, a CompactionRecord is persisted under
+// the compactions sidecar so the pre-compaction transcript can be inspected,
+// restored, or used to fork a branch session later.
 func (s *Store) Compact(sessionID string, keepN int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -351,8 +365,10 @@ func (s *Store) Compact(sessionID string, keepN int) (int, error) {
 		return 0, nil
 	}
 	removed := total - keepN
+	pre := deepCopyMessages(sess.Messages)
 	sess.Messages = sess.Messages[removed:]
 	sess.UpdatedAt = time.Now().UTC()
+	s.recordCompactionLocked(sessionID, keepN, removed, pre)
 	return removed, s.saveLocked()
 }
 
@@ -445,5 +461,5 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFile(s.path, raw, 0o644)
+	return fileutil.WriteFile(s.path, raw, 0o600)
 }

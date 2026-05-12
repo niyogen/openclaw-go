@@ -3,6 +3,7 @@ package channels
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -80,7 +81,7 @@ func BuildDiscordWebhookHandler(
 		}
 		if secret != "" {
 			header := strings.TrimSpace(r.Header.Get("X-OpenClaw-Webhook-Token"))
-			if header == "" || header != secret {
+			if header == "" || !hmac.Equal([]byte(header), []byte(secret)) {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}

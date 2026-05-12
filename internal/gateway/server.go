@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -31,8 +32,13 @@ import (
 )
 
 type Server struct {
-	host                  string
-	port                  int
+	host string
+	port int
+	// authMu guards authToken, password, trustedProxies, allowedOrigins —
+	// all of which are mutated via SetAuth/SetAuthToken/SetAllowedOrigins and
+	// the gateway.config RPC at runtime while isAuthorized/isAllowedOrigin
+	// read them on every request.
+	authMu                sync.RWMutex
 	authToken             string
 	password              string
 	trustedProxies        []string
@@ -76,15 +82,18 @@ type Server struct {
 	skillCfg []config.SkillConfig
 	mcpCfg   []config.MCPServerConfig
 
+	// webLogins drives the `web.login.start` / `web.login.wait` device-code flow.
+	webLogins *webLoginRegistry
+
 	memoryMu           sync.RWMutex
 	memoryCompactAfter int
 	memorySummarize    bool
 
 	// agentSummary* is updated from cmd/openclaw on startup and SIGHUP for gateway.status / UI.
-	agentSummaryMu          sync.RWMutex
-	agentSummaryProvider    string
-	agentSummaryModel       string
-	agentSummaryOpenAISet   bool
+	agentSummaryMu           sync.RWMutex
+	agentSummaryProvider     string
+	agentSummaryModel        string
+	agentSummaryOpenAISet    bool
 	agentSummaryAnthropicSet bool
 }
 
@@ -116,6 +125,22 @@ func New(
 		s.route = channels.NewRouter()
 	}
 	s.approvals = runtime.NewApprovalQueue()
+	s.webLogins = newWebLoginRegistry()
+	// Wire approvals → hookstore so external systems can react to pending
+	// requests without polling. The callback runs synchronously after
+	// Enqueue releases its lock, so it's safe to fire Emit (which spawns
+	// its own goroutines under a semaphore).
+	s.approvals.SetOnEnqueue(func(req runtime.ApprovalRequest) {
+		if s.hooks == nil {
+			return
+		}
+		s.hooks.Emit(hookstore.EventApprovalRequested, map[string]any{
+			"id":        req.ID,
+			"sessionId": req.SessionID,
+			"tool":      req.Tool,
+			"createdAt": req.CreatedAt,
+		})
+	})
 	s.rateLimiter = NewRateLimiter(120, time.Minute)
 	s.bus = NewEventBus()
 	s.shutdownFn = func() {} // replaced by Run()
@@ -254,9 +279,9 @@ func (s *Server) agentSummaryPayload() map[string]any {
 	s.agentSummaryMu.RLock()
 	defer s.agentSummaryMu.RUnlock()
 	return map[string]any{
-		"provider":                   s.agentSummaryProvider,
-		"model":                      s.agentSummaryModel,
-		"openaiApiKeyConfigured":     s.agentSummaryOpenAISet,
+		"provider":                  s.agentSummaryProvider,
+		"model":                     s.agentSummaryModel,
+		"openaiApiKeyConfigured":    s.agentSummaryOpenAISet,
 		"anthropicApiKeyConfigured": s.agentSummaryAnthropicSet,
 	}
 }
@@ -318,18 +343,55 @@ func (s *Server) Bus() *EventBus { return s.bus }
 // SetAuth configures additional auth modes (password, trusted proxies).
 // Safe to call after Run() for hot reload via SIGHUP.
 func (s *Server) SetAuth(password string, trustedProxies []string) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
 	s.password = strings.TrimSpace(password)
 	s.trustedProxies = trustedProxies
 }
 
 // SetAuthToken replaces the bearer token. Safe to call after Run().
 func (s *Server) SetAuthToken(token string) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
 	s.authToken = strings.TrimSpace(token)
 }
 
 // SetAllowedOrigins replaces the CORS/WS origin allowlist. Safe to call after Run().
 func (s *Server) SetAllowedOrigins(origins []string) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
 	s.allowedOrigins = normalizeOrigins(origins)
+}
+
+// authSnapshot returns a consistent snapshot of the auth-related fields under
+// a single RLock acquisition, so callers don't have to coordinate locks
+// themselves and can read stable values across an entire request.
+func (s *Server) authSnapshot() (authToken, password string, trustedProxies []string) {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	authToken = s.authToken
+	password = s.password
+	if len(s.trustedProxies) > 0 {
+		trustedProxies = append([]string(nil), s.trustedProxies...)
+	}
+	return
+}
+
+// authEnabledSnapshot reports whether any auth mode is configured.
+func (s *Server) authEnabledSnapshot() bool {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	return strings.TrimSpace(s.authToken) != "" || strings.TrimSpace(s.password) != ""
+}
+
+// trustedProxiesSnapshot returns a copy of the trusted-proxy list under RLock.
+func (s *Server) trustedProxiesSnapshot() []string {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	if len(s.trustedProxies) == 0 {
+		return nil
+	}
+	return append([]string(nil), s.trustedProxies...)
 }
 
 // SetMetricsRequireAuth controls whether GET /metrics requires the same credentials
@@ -428,8 +490,22 @@ func (s *Server) Run(ctx context.Context) error {
 		Handler: tracedMux,
 	}
 
+	// Lifecycle hook: gateway is fully wired and about to start listening.
+	s.hooks.Emit(hookstore.EventGatewayStarted, map[string]any{
+		"address": s.Address(),
+		"version": Version,
+		"time":    time.Now().UTC(),
+	})
+
 	go func() {
 		<-ctx.Done()
+		// Fire BEFORE Shutdown so external systems learn we're going away
+		// while we can still serve a final 200 (Shutdown blocks active
+		// requests until they finish or the deadline elapses).
+		s.hooks.Emit(hookstore.EventGatewayStopping, map[string]any{
+			"address": s.Address(),
+			"time":    time.Now().UTC(),
+		})
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
@@ -474,6 +550,11 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("GET /secrets", cors(s.withAuth(s.handleSecretsList)))
 	s.mux.Handle("POST /secrets", cors(s.withAuth(withBodyLimit(s.handleSecretsSet))))
 	s.mux.Handle("DELETE /secrets/{name}", cors(s.withAuth(s.handleSecretsDelete)))
+	// Web-login confirm flow: GET renders a confirm page, POST records the
+	// decision. The confirm POST is auth-gated when auth is enabled (token
+	// rotation) but open during initial setup (no token configured yet).
+	s.mux.HandleFunc("POST /web/login/{nonce}/confirm", cors(s.handleWebLoginConfirm))
+	s.mux.HandleFunc("GET /web/login/{nonce}", cors(s.handleWebLoginPage))
 	s.mux.HandleFunc("/rpc", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleRPC)))))
 	s.mux.HandleFunc("/ws", s.withAuth(s.handleWS))
 }
@@ -758,47 +839,59 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) isAuthorized(r *http.Request) bool {
+	authToken, password, trustedProxies := s.authSnapshot()
+
 	// If no auth configured, allow all.
-	if strings.TrimSpace(s.authToken) == "" && strings.TrimSpace(s.password) == "" {
+	if strings.TrimSpace(authToken) == "" && strings.TrimSpace(password) == "" {
 		return true
 	}
 
 	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
 
-	// Bearer token.
-	if s.authToken != "" {
+	// Bearer token (constant-time compare to defeat per-byte timing attacks).
+	if authToken != "" {
+		tokenBytes := []byte(authToken)
 		if strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
 			token := strings.TrimSpace(authorization[len("Bearer "):])
-			if token == s.authToken {
+			if constantTimeStringEqual(token, tokenBytes) {
 				return true
 			}
 		}
 		headerToken := strings.TrimSpace(r.Header.Get("X-OpenClaw-Token"))
-		if headerToken != "" && headerToken == s.authToken {
+		if headerToken != "" && constantTimeStringEqual(headerToken, tokenBytes) {
 			return true
 		}
 		queryToken := strings.TrimSpace(r.URL.Query().Get("token"))
-		if queryToken != "" && queryToken == s.authToken {
+		if queryToken != "" && constantTimeStringEqual(queryToken, tokenBytes) {
 			return true
 		}
 	}
 
-	// HTTP Basic password auth.
-	if s.password != "" {
-		if _, pass, ok := r.BasicAuth(); ok && pass == s.password {
+	// HTTP Basic password auth (constant-time).
+	if password != "" {
+		if _, pass, ok := r.BasicAuth(); ok && constantTimeStringEqual(pass, []byte(password)) {
 			return true
 		}
 	}
 
 	// Trusted proxy: allow requests from configured proxy IPs/CIDRs without auth.
-	if len(s.trustedProxies) > 0 {
-		remoteIP := clientIP(r)
-		if isTrustedProxy(remoteIP, s.trustedProxies) {
+	// SECURITY: must use the direct peer (RemoteAddr), NOT clientIP(), because
+	// clientIP() honors X-Forwarded-For which an attacker can spoof to claim
+	// any trusted-proxy IP and bypass auth entirely.
+	if len(trustedProxies) > 0 {
+		if isTrustedProxy(directRemoteIP(r), trustedProxies) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// constantTimeStringEqual reports whether got equals want using a comparison
+// whose timing does not leak which byte of want differed. Length-mismatched
+// inputs return false in constant time relative to the longer input.
+func constantTimeStringEqual(got string, want []byte) bool {
+	return subtle.ConstantTimeCompare([]byte(got), want) == 1
 }
 
 type messageRequest struct {
@@ -1023,7 +1116,7 @@ func (s *Server) gatewayStatus() map[string]any {
 		"service":            "openclaw-go-gateway",
 		"version":            Version,
 		"address":            s.Address(),
-		"authEnabled":        strings.TrimSpace(s.authToken) != "" || strings.TrimSpace(s.password) != "",
+		"authEnabled":        s.authEnabledSnapshot(),
 		"metricsRequireAuth": s.metricsRequireAuth.Load(),
 		"uptime":             time.Since(s.startedAt).String(),
 		"time":               time.Now().UTC(),
@@ -1371,6 +1464,60 @@ func (s *Server) dispatchRPC(
 			return nil, &rpcError{Code: -32001, Message: err.Error()}
 		}
 		return map[string]any{"ok": true, "removed": removed}, nil
+	case "sessions.compaction.list":
+		var p sessionIDParams
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.SessionID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+		}
+		return s.store.CompactionList(p.SessionID), nil
+	case "sessions.compaction.get":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "id is required"}
+		}
+		rec, ok := s.store.CompactionGet(p.ID)
+		if !ok {
+			return nil, &rpcError{Code: -32001, Message: "compaction record not found"}
+		}
+		return rec, nil
+	case "sessions.compaction.restore":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "id is required"}
+		}
+		if err := s.store.CompactionRestore(p.ID); err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		return map[string]any{"ok": true, "id": p.ID}, nil
+	case "sessions.compaction.branch":
+		var p struct {
+			ID           string `json:"id"`
+			NewSessionID string `json:"newSessionId"`
+		}
+		if len(params) == 0 {
+			return nil, &rpcError{Code: -32602, Message: "invalid params"}
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.ID) == "" {
+			return nil, &rpcError{Code: -32602, Message: "id is required"}
+		}
+		branch, err := s.store.CompactionBranch(p.ID, strings.TrimSpace(p.NewSessionID))
+		if err != nil {
+			return nil, &rpcError{Code: -32001, Message: err.Error()}
+		}
+		return branch, nil
 	case "sessions.stats":
 		var p sessionIDParams
 		if len(params) == 0 {
@@ -1480,7 +1627,7 @@ func (s *Server) dispatchRPC(
 				"host":        s.host,
 				"address":     s.Address(),
 				"version":     Version,
-				"authEnabled": strings.TrimSpace(s.authToken) != "" || strings.TrimSpace(s.password) != "",
+				"authEnabled": s.authEnabledSnapshot(),
 			},
 			"tools":    s.tools.List(),
 			"plugins":  s.registry.Names(),
@@ -1527,13 +1674,16 @@ func (s *Server) dispatchRPC(
 				return nil, &rpcError{Code: -32602, Message: "invalid params"}
 			}
 		}
-		// Apply known fields to in-memory state.
+		// Apply known fields to in-memory state under the auth lock so
+		// concurrent isAuthorized readers see a consistent token/password pair.
+		s.authMu.Lock()
 		if tok, ok := patch["authToken"].(string); ok {
 			s.authToken = strings.TrimSpace(tok)
 		}
 		if password, ok := patch["password"].(string); ok {
 			s.password = strings.TrimSpace(password)
 		}
+		s.authMu.Unlock()
 		// Persist to config file so changes survive restart.
 		if cfgPath, err := config.DefaultPath(); err == nil {
 			if cfg, err := config.Load(cfgPath); err == nil {
@@ -2388,6 +2538,12 @@ func (s *Server) dispatchRPC(
 	case "wizard.status":
 		return map[string]any{"active": false, "message": "no active wizard"}, nil
 
+	// ── web.login.* (device-code-style browser approval) ─────────────────
+	case "web.login.start":
+		return s.rpcWebLoginStart(params)
+	case "web.login.wait":
+		return s.rpcWebLoginWait(ctx, params)
+
 	// ── heartbeat / presence ─────────────────────────────────────────────
 	case "last-heartbeat", "set-heartbeats":
 		return map[string]any{"ok": true, "time": time.Now().UTC()}, nil
@@ -2823,6 +2979,8 @@ func isTrustedProxy(remoteIP string, proxies []string) bool {
 }
 
 func (s *Server) isAllowedOrigin(origin string) bool {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
 	if len(s.allowedOrigins) == 0 {
 		return true
 	}
@@ -2832,6 +2990,13 @@ func (s *Server) isAllowedOrigin(origin string) bool {
 	}
 	_, ok := s.allowedOrigins[trimmed]
 	return ok
+}
+
+// hasAllowedOrigins reports whether the CORS allowlist is non-empty.
+func (s *Server) hasAllowedOrigins() bool {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	return len(s.allowedOrigins) > 0
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -2856,7 +3021,7 @@ func withBodyLimit(next http.HandlerFunc) http.HandlerFunc {
 // When allowedOrigins is configured it echoes the origin if it matches
 // (enabling credentials), otherwise falls back to *.
 func (s *Server) corsAllowOrigin(origin string) string {
-	if len(s.allowedOrigins) > 0 && s.isAllowedOrigin(origin) {
+	if s.hasAllowedOrigins() && s.isAllowedOrigin(origin) {
 		return origin
 	}
 	// No allowlist configured — use wildcard (safe for unauthenticated APIs).

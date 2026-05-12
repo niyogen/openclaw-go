@@ -124,5 +124,5 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFile(s.path, raw, 0o644)
+	return fileutil.WriteFile(s.path, raw, 0o600)
 }

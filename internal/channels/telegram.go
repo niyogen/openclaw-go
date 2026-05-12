@@ -3,6 +3,7 @@ package channels
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -101,7 +102,7 @@ func (t *TelegramChannel) BuildWebhookHandler(
 		}
 		if trimmedSecret != "" {
 			headerSecret := strings.TrimSpace(r.Header.Get("X-Telegram-Bot-Api-Secret-Token"))
-			if headerSecret == "" || headerSecret != trimmedSecret {
+			if headerSecret == "" || !hmac.Equal([]byte(headerSecret), []byte(trimmedSecret)) {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -205,7 +206,7 @@ func BuildTelegramWebhookHandler(
 		}
 		if trimmedSecret != "" {
 			headerSecret := strings.TrimSpace(r.Header.Get("X-Telegram-Bot-Api-Secret-Token"))
-			if headerSecret == "" || headerSecret != trimmedSecret {
+			if headerSecret == "" || !hmac.Equal([]byte(headerSecret), []byte(trimmedSecret)) {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}

@@ -222,8 +222,8 @@ func scheduleInterval(schedule string) (time.Duration, error) {
 	case "weekly", "@weekly":
 		return 7 * 24 * time.Hour, nil
 	}
-	if strings.HasPrefix(s, "@every ") {
-		d, err := time.ParseDuration(strings.TrimPrefix(s, "@every "))
+	if rest, ok := strings.CutPrefix(s, "@every "); ok {
+		d, err := time.ParseDuration(rest)
 		if err != nil {
 			return 0, fmt.Errorf("invalid @every schedule %q: %w", schedule, err)
 		}
@@ -318,5 +318,5 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFile(s.path, raw, 0o644)
+	return fileutil.WriteFile(s.path, raw, 0o600)
 }

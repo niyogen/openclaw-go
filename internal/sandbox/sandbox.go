@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -41,6 +42,12 @@ type Options struct {
 
 	// ReadOnly mounts the container filesystem as read-only.
 	ReadOnly bool
+
+	// Stdin, if non-nil, is piped into the container via `docker run -i`.
+	// Use this to deliver payloads (e.g. JSON arguments) without exposing
+	// them in argv — argv is visible to anyone who can read `ps` output or
+	// `docker inspect`, so secrets must travel through stdin instead.
+	Stdin io.Reader
 }
 
 // Result is the output of a sandboxed run.
@@ -83,28 +90,16 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(opts.TimeoutSec)*time.Second)
 	defer cancel()
 
-	args := []string{"run", "--rm", "--network=" + opts.Network}
-	if opts.MemoryMB > 0 {
-		args = append(args, fmt.Sprintf("--memory=%dm", opts.MemoryMB))
-		args = append(args, fmt.Sprintf("--memory-swap=%dm", opts.MemoryMB))
-	}
-	if opts.CPUs > 0 {
-		args = append(args, fmt.Sprintf("--cpus=%.2f", opts.CPUs))
-	}
-	if opts.ReadOnly {
-		args = append(args, "--read-only")
-	}
-	for _, e := range opts.Env {
-		args = append(args, "-e", e)
-	}
-	args = append(args, opts.Image)
-	args = append(args, opts.Command...)
+	args := buildDockerArgs(opts)
 
 	start := time.Now()
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(runCtx, "docker", args...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if opts.Stdin != nil {
+		cmd.Stdin = opts.Stdin
+	}
 
 	err := cmd.Run()
 	dur := time.Since(start)
@@ -131,6 +126,34 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		ExitCode: exitCode,
 		Duration: dur,
 	}, nil
+}
+
+// buildDockerArgs assembles the `docker run` argv from Options. Factored out
+// so tests can assert security-relevant invariants (no secrets in argv, -i
+// added when stdin is in use) without spawning docker.
+func buildDockerArgs(opts Options) []string {
+	args := []string{"run", "--rm", "--network=" + opts.Network}
+	if opts.MemoryMB > 0 {
+		args = append(args, fmt.Sprintf("--memory=%dm", opts.MemoryMB))
+		args = append(args, fmt.Sprintf("--memory-swap=%dm", opts.MemoryMB))
+	}
+	if opts.CPUs > 0 {
+		args = append(args, fmt.Sprintf("--cpus=%.2f", opts.CPUs))
+	}
+	if opts.ReadOnly {
+		args = append(args, "--read-only")
+	}
+	if opts.Stdin != nil {
+		// -i keeps STDIN open inside the container so the caller's payload
+		// is actually delivered to the entrypoint, not swallowed by docker.
+		args = append(args, "-i")
+	}
+	for _, e := range opts.Env {
+		args = append(args, "-e", e)
+	}
+	args = append(args, opts.Image)
+	args = append(args, opts.Command...)
+	return args
 }
 
 // ErrDockerUnavailable is returned when the Docker daemon is not reachable.
@@ -172,15 +195,17 @@ func RunScript(ctx context.Context, script string, opts Options) (*Result, error
 	return Run(ctx, opts)
 }
 
-// InvokeToolJSON sends a JSON payload to a command inside the sandbox and
-// returns the parsed JSON output.  The command must accept JSON on stdin
-// and write JSON to stdout.
+// InvokeToolJSON sends a JSON payload to a command inside the sandbox via
+// STDIN and returns the parsed JSON output.  The command must accept JSON on
+// stdin and write JSON to stdout. The payload is intentionally NOT placed in
+// argv — argv leaks to `ps` and `docker inspect`, so anything sensitive in
+// the payload would be exposed to other local users.
 func InvokeToolJSON(ctx context.Context, payload any, opts Options) (any, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	opts.Command = append(opts.Command, string(raw))
+	opts.Stdin = bytes.NewReader(raw)
 	result, err := Run(ctx, opts)
 	if err != nil {
 		return nil, err

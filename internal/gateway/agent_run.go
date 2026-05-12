@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +90,12 @@ func (s *Server) handleAgentRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = s.store.UpsertSession(req.SessionID, "cli", "")
+
+	s.hooks.Emit(hookstore.EventAgentRunStarted, map[string]any{
+		"sessionId":  req.SessionID,
+		"messageLen": len(req.Message),
+		"streaming":  false,
+	})
 
 	// Snapshot history BEFORE appending the current user message so that
 	// buildMessages (which also appends turn.Message) doesn't duplicate it.
@@ -209,6 +216,12 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 
 	_ = s.store.UpsertSession(req.SessionID, "cli", "")
 
+	s.hooks.Emit(hookstore.EventAgentRunStarted, map[string]any{
+		"sessionId":  req.SessionID,
+		"messageLen": len(req.Message),
+		"streaming":  true,
+	})
+
 	var history []agents.HistoryMessage
 	if sess, ok2 := s.store.Get(req.SessionID); ok2 {
 		for _, m := range sess.Messages {
@@ -258,7 +271,14 @@ func (s *Server) handleAgentRunStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	writeSSE := func(ev runtime.RunEvent) {
-		raw, _ := json.Marshal(ev)
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			// Don't emit a malformed `data: \n\n` frame — log and skip.
+			// The client will see the gap (and any subsequent events keep
+			// arriving) rather than parsing an empty event as the run state.
+			fmt.Fprintf(os.Stderr, "[gateway] sse marshal failed type=%s: %v\n", ev.Type, err)
+			return
+		}
 		fmt.Fprintf(w, "data: %s\n\n", raw)
 		flusher.Flush()
 	}

@@ -40,3 +40,55 @@ func TestHookStoreAddRemoveList(t *testing.T) {
 		t.Fatal("expected 0 hooks after remove")
 	}
 }
+
+// TestHookStoreLifecycleEventTypes pins the new event-type constants added in
+// P0.6 so a careless rename in hookstore.go can't silently disconnect every
+// subscriber that registered under the old name.
+func TestHookStoreLifecycleEventTypes(t *testing.T) {
+	cases := map[EventType]string{
+		EventGatewayStarted:    "gateway.started",
+		EventGatewayStopping:   "gateway.stopping",
+		EventAgentRunStarted:   "agent.run.started",
+		EventApprovalRequested: "approval.requested",
+	}
+	for got, want := range cases {
+		if string(got) != want {
+			t.Fatalf("event constant drifted: got %q want %q", got, want)
+		}
+	}
+}
+
+// TestHookStoreLifecycleRoutesByEvent confirms ForEvent correctly partitions
+// hooks across the new lifecycle events without leakage.
+func TestHookStoreLifecycleRoutesByEvent(t *testing.T) {
+	s, err := New(filepath.Join(t.TempDir(), "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []EventType{
+		EventGatewayStarted,
+		EventGatewayStopping,
+		EventAgentRunStarted,
+		EventApprovalRequested,
+	}
+	for i, ev := range events {
+		if err := s.Add(Hook{
+			ID:      string(ev),
+			Name:    string(ev),
+			Event:   ev,
+			Type:    HookTypeLog,
+			Enabled: true,
+		}); err != nil {
+			t.Fatalf("Add %d: %v", i, err)
+		}
+	}
+	for _, ev := range events {
+		got := s.ForEvent(ev)
+		if len(got) != 1 {
+			t.Fatalf("ForEvent(%s): got %d hooks want 1", ev, len(got))
+		}
+		if got[0].ID != string(ev) {
+			t.Fatalf("ForEvent(%s) returned wrong hook %q", ev, got[0].ID)
+		}
+	}
+}

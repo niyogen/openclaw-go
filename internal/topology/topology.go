@@ -328,7 +328,7 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFile(s.path, raw, 0o644)
+	return fileutil.WriteFile(s.path, raw, 0o600)
 }
 
 func (s *Store) load() error {

@@ -191,7 +191,7 @@ func (w *Workspace) save() error {
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFile(w.path, raw, 0o644)
+	return fileutil.WriteFile(w.path, raw, 0o600)
 }
 
 func (w *Workspace) load() error {

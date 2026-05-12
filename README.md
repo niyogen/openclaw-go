@@ -39,7 +39,18 @@ Implemented MVP:
 - `openclaw configure whatsapp enable <true|false>`
 - `openclaw configure whatsapp inbound-mode <webhook>`
 - `openclaw configure whatsapp webhook-path <path>`
+- `openclaw configure email enable|host|port|user|password|from <value>` (SMTP outbound)
+- `openclaw configure signal enable|baseurl|number <value>` (via signal-cli-rest-api sidecar)
+- `openclaw configure matrix enable|baseurl|token <value>` (Client-Server API)
+- `openclaw configure mattermost enable|baseurl|token <value>` (v4 posts API)
+- `openclaw onboard [--provider X --openai-key X --anthropic-key X --gateway-token X --gateway-port X]` — scriptable onboarding (bare form still writes the default config)
+- `openclaw dashboard` — print the gateway URL and best-effort open it in a browser
 - `openclaw doctor` for quick local health/config checks
+- `openclaw daemon install|uninstall|path` — write a systemd-user unit (Linux) or launchd plist (macOS); prints the activation command rather than auto-running it
+- `openclaw web-login` — drive the device-code-style approval flow (calls `web.login.start`, opens the browser, long-polls `web.login.wait`, prints the issued bearer token)
+- `openclaw compaction list|get|restore|branch` — inspect and act on session-compaction history (`restore` requires `--yes`)
+- `openclaw backup [list]` / `openclaw restore <backup-path> --yes`
+- `openclaw message send|history|dispatch ...` — send a message, fetch a session transcript, or push an outbound to a specific channel by name
 - `openclaw gateway` / `openclaw gateway run` starts an HTTP gateway server
 - **`GET /ui/`** — embedded **control panel** (health, gateway status, session/cron/hook counts, log preview, quick infer via JSON-RPC `message.send`); **`GET /`** redirects to **`/ui/`** (UI routes use the same gateway auth as `/rpc` when a token or password is configured — the static page does not inject **`Authorization`** headers, so for locked-down gateways use the CLI or curl with a Bearer token)
 - `GET /health` for status checks (includes `version`)
@@ -61,7 +72,8 @@ Implemented MVP:
 - `GET /sessions/{id}` to fetch one session
 - `DELETE /sessions/{id}` to remove a session
 - `POST /message` to append user/assistant turns
-- `POST /rpc` JSON-RPC 2.0 endpoint (`health`, `gateway.status` — includes `metricsRequireAuth`, `update.status`, `update.run`, `tracing.status`, `node.invoke` to forward RPC to a registered peer, `sessions.list`, `sessions.get`, `sessions.delete`, `message.send`, `plugins.list`, `models.list`, `models.capability`, `tools.list`, `tools.invoke`, `agent.run`, `approvals.list`, `approvals.decide`)
+- `POST /rpc` JSON-RPC 2.0 endpoint (`health`, `gateway.status` — includes `metricsRequireAuth`, `update.status`, `update.run`, `tracing.status`, `node.invoke` to forward RPC to a registered peer, `sessions.list`, `sessions.get`, `sessions.delete`, `sessions.compaction.list`, `sessions.compaction.get`, `sessions.compaction.restore`, `sessions.compaction.branch`, `message.send`, `plugins.list`, `models.list`, `models.capability`, `tools.list`, `tools.invoke`, `agent.run`, `approvals.list`, `approvals.decide`, `web.login.start`, `web.login.wait`)
+- `GET /web/login/{nonce}` — minimal HTML confirm page for the device-code flow; `POST /web/login/{nonce}/confirm` records the decision and issues a fresh bearer token (auth-gated when the gateway already has auth configured; open during initial setup)
 - `GET /ws` WebSocket endpoint (heartbeat + echo)
 - gateway auth token support for `/sessions`, `/message`, `/rpc`, `/ws` (and for `GET /metrics` when `gateway.metricsRequireAuth` is `true` in config — use Prometheus `authorization` / `bearer_token` on the scrape job)
 - gateway request tracing: middleware sets `X-Request-ID` on every response; reuse a client-provided `X-Request-ID` (sanitized, max 128 chars) for log correlation
@@ -88,6 +100,10 @@ Implemented MVP:
   - teams inbound webhook bridge mode with optional token header (webhook POST bodies capped at 4 MiB)
   - whatsapp outbound adapter via Cloud API (`/{phone_number_id}/messages`)
   - whatsapp inbound webhook mode (GET verify + POST events, optional app-secret signature check); when **`channels.whatsapp.enabled`** is `true`, **`WHATSAPP_VERIFY_TOKEN`** / **`channels.whatsapp.verifyToken`** is **required** (gateway refuses to start otherwise). Webhook POST bodies are capped at 4 MiB (same order as other JSON routes).
+  - email outbound (SMTP) — port 465 uses implicit TLS, port 587 (default) negotiates STARTTLS when the server advertises it; PLAIN auth with the configured username/password; plaintext UTF-8 body with auto-derived `[sessionId] firstLine` subject. **Outbound only** — IMAP inbound is not implemented (would require a non-stdlib client or a from-scratch RFC 3501 parser).
+  - signal outbound — POSTs to a configurable signal-cli-rest-api sidecar's `/v2/send` endpoint with `{message, number, recipients}`. Disabled when `baseUrl` OR `number` is empty. Inbound deferred.
+  - matrix outbound — PUTs `/_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}` with bearer auth; per-process unique txn ids make the PUT replay-idempotent. Target must be a room id (`!opaque:server`), not an alias. Inbound `/sync` long-poll deferred.
+  - mattermost outbound — POSTs `/api/v4/posts` with bearer auth; `OutboundMessage.ThreadID` populates `root_id` for threaded replies. Inbound deferred (operators can wire MM's outgoing-webhook into the generic webhook channel).
 
 State is persisted at:
 
@@ -136,7 +152,7 @@ Before exposing the gateway on a network:
 - Back up **`~/.openclaw-go/`** (sessions, secrets, cron, hooks, topology) or your **`OPENCLAW_CONFIG_PATH`** directory on a schedule.
 - Run **`go test ./...`** (and optionally **`go test -tags=integration ./...`**) before releases; use **`make e2e`** or **`./scripts/smoke.sh`** against a running instance for a quick sanity check.
 
-See [docs/PARITY.md](docs/PARITY.md) for a pinned parity checklist vs upstream OpenClaw, and **[docs/OPERATOR_QUICKSTART.md](docs/OPERATOR_QUICKSTART.md)** for HTTP + Telegram + WhatsApp setup.
+See [docs/PARITY.md](docs/PARITY.md) for a pinned parity checklist vs upstream OpenClaw, [docs/PARITY-PLAN.md](docs/PARITY-PLAN.md) for the active execution plan with status per item and pickup triggers for deferred work, [docs/PLUGIN-ARCHITECTURE.md](docs/PLUGIN-ARCHITECTURE.md) for the plugin-system design note, [CHANGELOG.md](CHANGELOG.md) for the running release history, [SECURITY.md](SECURITY.md) for the disclosure policy, and **[docs/OPERATOR_QUICKSTART.md](docs/OPERATOR_QUICKSTART.md)** for HTTP + Telegram + WhatsApp setup.
 
 ## Run and test capabilities
 

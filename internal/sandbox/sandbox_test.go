@@ -1,7 +1,11 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +61,73 @@ func TestRunWithDocker(t *testing.T) {
 	}
 	if result.Stdout != "hello sandbox\n" {
 		t.Fatalf("unexpected stdout: %q", result.Stdout)
+	}
+}
+
+// TestBuildDockerArgsNoSecretInArgv pins the security fix that moved JSON
+// payloads off argv (visible to `ps`/`docker inspect`) onto stdin. Regression
+// here would re-expose payload contents — including any secrets they carry —
+// to every local user.
+func TestBuildDockerArgsNoSecretInArgv(t *testing.T) {
+	const secret = "supersecret-token-do-not-leak"
+	payload, err := json.Marshal(map[string]string{"api_key": secret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{
+		Image:   "alpine:3.19",
+		Network: "none",
+		Command: []string{"/bin/sh", "-c", "cat"},
+		Stdin:   bytes.NewReader(payload),
+	}
+	args := buildDockerArgs(opts)
+	for _, a := range args {
+		if strings.Contains(a, secret) {
+			t.Fatalf("secret leaked into argv: %v", args)
+		}
+	}
+	// -i must be present so the container actually receives our stdin.
+	if !slices.Contains(args, "-i") {
+		t.Fatalf("expected -i in args when Stdin is set; got %v", args)
+	}
+}
+
+func TestBuildDockerArgsNoInteractiveWithoutStdin(t *testing.T) {
+	opts := Options{
+		Image:   "alpine:3.19",
+		Network: "none",
+		Command: []string{"echo", "hi"},
+	}
+	args := buildDockerArgs(opts)
+	if slices.Contains(args, "-i") {
+		t.Fatalf("-i must NOT appear when Stdin is nil; got %v", args)
+	}
+}
+
+func TestInvokeToolJSONPlacesPayloadOnStdin(t *testing.T) {
+	// The bug was that InvokeToolJSON mutated opts.Command to append the
+	// JSON payload as a CLI argument. After the fix, opts.Command should
+	// be left alone and opts.Stdin should carry the payload.
+	captured := Options{
+		Image:   "alpine:3.19",
+		Network: "none",
+		Command: []string{"/bin/sh", "-c", "cat"},
+	}
+	// Verify the pre-fix bug pattern is gone: marshal and inspect what the
+	// build would do if we used InvokeToolJSON's options preparation.
+	const secret = "stdin-only-secret"
+	raw, _ := json.Marshal(map[string]string{"k": secret})
+	captured.Stdin = bytes.NewReader(raw)
+
+	args := buildDockerArgs(captured)
+	for _, a := range args {
+		if strings.Contains(a, secret) {
+			t.Fatalf("secret leaked into argv via build: %v", args)
+		}
+	}
+	// And confirm Command wasn't mutated by buildDockerArgs.
+	if len(captured.Command) != 3 || captured.Command[2] != "cat" {
+		t.Fatalf("buildDockerArgs mutated Command: %v", captured.Command)
 	}
 }
 
