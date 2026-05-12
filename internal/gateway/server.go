@@ -52,6 +52,7 @@ type Server struct {
 	tools                 *ToolRegistry
 	approvals             *runtime.ApprovalQueue
 	push                  *push.Service
+	channelPlugins        *plugins.ChannelPluginRegistry
 	logs                  *logstore.Store
 	cron                  *cronstore.Store
 	hooks                 *hookstore.Store
@@ -384,6 +385,23 @@ func (s *Server) SetPushService(ps *push.Service) {
 	s.authMu.Lock()
 	defer s.authMu.Unlock()
 	s.push = ps
+}
+
+// SetChannelPluginRegistry attaches the channel-plugin registry. Used by
+// the plugins.channel.* RPCs to list / approve / revoke. Safe to call
+// after Run() (writes/reads guarded by authMu).
+func (s *Server) SetChannelPluginRegistry(reg *plugins.ChannelPluginRegistry) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	s.channelPlugins = reg
+}
+
+// ChannelPluginRegistry returns the configured registry, or nil if none
+// has been attached (no plugins are enabled).
+func (s *Server) ChannelPluginRegistry() *plugins.ChannelPluginRegistry {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	return s.channelPlugins
 }
 
 // PushService returns the configured push service, or nil if disabled.
@@ -1267,6 +1285,49 @@ func (s *Server) dispatchRPC(
 			return map[string]any{"plugins": []string{}}, nil
 		}
 		return map[string]any{"plugins": s.registry.Names()}, nil
+	case "plugins.channel.list":
+		// Channel plugins (per docs/PLUGIN-ARCHITECTURE.md) — pending +
+		// approved entries with their approval state.
+		reg := s.ChannelPluginRegistry()
+		if reg == nil {
+			return map[string]any{"plugins": []any{}}, nil
+		}
+		return map[string]any{"plugins": reg.List()}, nil
+	case "plugins.channel.approve":
+		reg := s.ChannelPluginRegistry()
+		if reg == nil {
+			return nil, &rpcError{Code: -32001, Message: "channel-plugin registry not configured"}
+		}
+		var p struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.Name) == "" {
+			return nil, &rpcError{Code: -32602, Message: "name is required"}
+		}
+		token, err := reg.Approve(strings.TrimSpace(p.Name))
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		// IMPORTANT: the token is returned ONCE here. Operator must copy
+		// it into the plugin's OPENCLAW_PLUGIN_TOKEN env var. Subsequent
+		// approve calls return the existing token (idempotent) — to
+		// rotate, revoke first.
+		return map[string]any{"name": p.Name, "token": token, "state": "approved"}, nil
+	case "plugins.channel.revoke":
+		reg := s.ChannelPluginRegistry()
+		if reg == nil {
+			return nil, &rpcError{Code: -32001, Message: "channel-plugin registry not configured"}
+		}
+		var p struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.Name) == "" {
+			return nil, &rpcError{Code: -32602, Message: "name is required"}
+		}
+		if err := reg.Revoke(strings.TrimSpace(p.Name)); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"name": p.Name, "state": "pending"}, nil
 	case "agent.run":
 		var req agentRunRequest
 		if len(params) == 0 {

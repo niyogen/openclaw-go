@@ -421,7 +421,7 @@ func main() {
 			}
 		}
 	case "plugins":
-		if err := get(baseURL + "/plugins"); err != nil {
+		if err := runPluginsCLI(baseURL, os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "plugins error: %v\n", err)
 			os.Exit(1)
 		}
@@ -739,7 +739,7 @@ func printUsage() {
 	fmt.Println("  openclaw cron [list|add <id> <schedule> <cmd>|delete <id>]")
 	fmt.Println("  openclaw hooks [list|add <id> <event> <type> <target>|delete <id>]")
 	fmt.Println("  openclaw secrets [list|set <name> <value>|delete <name>]")
-	fmt.Println("  openclaw plugins")
+	fmt.Println("  openclaw plugins [channel list|channel approve <name>|channel revoke <name>]")
 	fmt.Println("  openclaw approvals")
 	fmt.Println("  openclaw approve <approval-id>")
 	fmt.Println("  openclaw reject <approval-id>")
@@ -1019,6 +1019,31 @@ func runGateway(cfg config.Config) error {
 
 	// Configure additional auth modes (password + trusted proxies).
 	server.SetAuth(cfg.Gateway.Password, cfg.Gateway.TrustedProxies)
+
+	// Channel plugins: scan pluginsDir for plugin.json manifests that
+	// declare a channel, build pluginChannel instances for the approved
+	// ones, register them with the router (alongside built-ins), and
+	// mount the gateway-side inbound handler. Pending plugins are
+	// catalogued but not active — operator runs `openclaw plugins
+	// approve <name>` to issue a token and flip them on.
+	channelPluginsDir := pluginsDir
+	channelTokensFile := filepath.Join(dataDir, "channel-plugin-tokens.json")
+	channelReg, err := plugins.NewChannelPluginRegistry(channelPluginsDir, channelTokensFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: channel-plugin registry init failed: %v (channel plugins disabled)\n", err)
+	} else {
+		server.SetChannelPluginRegistry(channelReg)
+		for _, m := range channelReg.ApprovedManifests() {
+			channelRouter.Register(plugins.NewPluginChannel(m))
+		}
+		server.HandleFunc(
+			"/plugins/{name}/inbound",
+			plugins.BuildChannelPluginInboundHandler(channelReg, func(inboundCtx context.Context, inbound channels.InboundMessage) error {
+				_, err := server.HandleInbound(inboundCtx, inbound)
+				return err
+			}),
+		)
+	}
 
 	// Web Push: only enabled when an operator-supplied contact is present.
 	// Push providers reject anonymous senders, so a missing contact is a
@@ -2452,6 +2477,49 @@ func openBrowser(url string) error {
 		// "executable not found" and the caller falls through to the
 		// manual-URL hint.
 		return execOpen("xdg-open", url)
+	}
+}
+
+// runPluginsCLI dispatches `openclaw plugins [subcmd]`. With no subcmd
+// it preserves the historical behaviour (GET /plugins, list legacy
+// plugins). New subcommands manage channel plugins:
+//
+//	openclaw plugins channel list
+//	openclaw plugins channel approve <name>
+//	openclaw plugins channel revoke <name>
+//
+// Approve prints the issued bearer token ONCE — the operator copies it
+// into the plugin's OPENCLAW_PLUGIN_TOKEN env var. Subsequent approves
+// are idempotent (same token); rotation requires revoke + approve.
+func runPluginsCLI(baseURL string, args []string) error {
+	if len(args) == 0 {
+		// Backward-compatible default: list legacy (route/tool) plugins.
+		return get(baseURL + "/plugins")
+	}
+	rpcURL := baseURL + "/rpc"
+	switch args[0] {
+	case "channel":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: openclaw plugins channel list|approve|revoke ...")
+		}
+		switch args[1] {
+		case "list":
+			return rpc(rpcURL, "plugins.channel.list", map[string]any{})
+		case "approve":
+			if len(args) < 3 {
+				return fmt.Errorf("usage: openclaw plugins channel approve <name>")
+			}
+			return rpc(rpcURL, "plugins.channel.approve", map[string]any{"name": args[2]})
+		case "revoke":
+			if len(args) < 3 {
+				return fmt.Errorf("usage: openclaw plugins channel revoke <name>")
+			}
+			return rpc(rpcURL, "plugins.channel.revoke", map[string]any{"name": args[2]})
+		default:
+			return fmt.Errorf("unknown plugins channel subcommand %q", args[1])
+		}
+	default:
+		return fmt.Errorf("unknown plugins subcommand %q", args[0])
 	}
 }
 

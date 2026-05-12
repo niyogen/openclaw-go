@@ -22,6 +22,11 @@ type Manifest struct {
 	Routes      []ManifestRoute   `json:"routes"`
 	Tools       []ManifestTool    `json:"tools"`
 	Env         map[string]string `json:"env"` // key → env var name for config
+
+	// Channel, when non-nil, declares that this plugin implements a
+	// channels.Channel via the contract in docs/PLUGIN-ARCHITECTURE.md.
+	// See ChannelManifest for fields.
+	Channel *ChannelManifest `json:"channel,omitempty"`
 }
 
 // ManifestRoute declares an HTTP route the plugin wants to expose via the gateway.
