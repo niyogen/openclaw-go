@@ -742,6 +742,7 @@ func printUsage() {
 	fmt.Println("  openclaw hooks [list|add <id> <event> <type> <target>|delete <id>]")
 	fmt.Println("  openclaw secrets [list|set <name> <value>|delete <name>]")
 	fmt.Println("  openclaw plugins [channel list|channel approve <name>|channel revoke <name>]")
+	fmt.Println("  openclaw plugins [tool list|tool approve <name>|tool revoke <name>]")
 	fmt.Println("  openclaw approvals")
 	fmt.Println("  openclaw approve <approval-id>")
 	fmt.Println("  openclaw reject <approval-id>")
@@ -1055,6 +1056,41 @@ func runGateway(cfg config.Config) error {
 				return err
 			}),
 		)
+	}
+
+	// Tool plugins: scan pluginsDir for plugin.json manifests that
+	// declare tools[]. For each approved manifest, register every
+	// declared tool with the gateway's ToolRegistry — a JSON Schema-less
+	// tool whose handler POSTs to the plugin's endpoint. Pending tool
+	// plugins are catalogued but not registered (operator approves via
+	// `openclaw plugins tool approve <name>`; a SIGHUP/restart picks
+	// them up).
+	toolPluginsDir := pluginsDir
+	toolTokensFile := filepath.Join(dataDir, "tool-plugin-tokens.json")
+	toolReg, err := plugins.NewToolPluginRegistry(toolPluginsDir, toolTokensFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[openclaw-go] WARNING: tool-plugin registry init failed: %v (tool plugins disabled)\n", err)
+	} else {
+		server.SetToolPluginRegistry(toolReg)
+		for _, m := range toolReg.ApprovedManifests() {
+			for _, t := range m.Tools {
+				if strings.TrimSpace(t.Name) == "" || strings.TrimSpace(t.Endpoint) == "" {
+					continue
+				}
+				// Capture by value for the closure below.
+				tname := t.Name
+				endpoint := t.Endpoint
+				desc := t.Description
+				h := plugins.NewPluginToolHandler(endpoint)
+				server.Tools().Register(
+					gateway.Tool{Name: tname, Description: desc},
+					func(ctx context.Context, args map[string]any) (any, error) {
+						return h(ctx, args)
+					},
+				)
+				fmt.Printf("registered tool-plugin: %s/%s → %s\n", m.Name, tname, endpoint)
+			}
+		}
 	}
 
 	// Web Push: only enabled when an operator-supplied contact is present.
@@ -2528,6 +2564,9 @@ func openBrowser(url string) error {
 //	openclaw plugins channel list
 //	openclaw plugins channel approve <name>
 //	openclaw plugins channel revoke <name>
+//	openclaw plugins tool list
+//	openclaw plugins tool approve <name>
+//	openclaw plugins tool revoke <name>
 //
 // Approve prints the issued bearer token ONCE — the operator copies it
 // into the plugin's OPENCLAW_PLUGIN_TOKEN env var. Subsequent approves
@@ -2558,6 +2597,26 @@ func runPluginsCLI(baseURL string, args []string) error {
 			return rpc(rpcURL, "plugins.channel.revoke", map[string]any{"name": args[2]})
 		default:
 			return fmt.Errorf("unknown plugins channel subcommand %q", args[1])
+		}
+	case "tool":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: openclaw plugins tool list|approve|revoke ...")
+		}
+		switch args[1] {
+		case "list":
+			return rpc(rpcURL, "plugins.tool.list", map[string]any{})
+		case "approve":
+			if len(args) < 3 {
+				return fmt.Errorf("usage: openclaw plugins tool approve <name>")
+			}
+			return rpc(rpcURL, "plugins.tool.approve", map[string]any{"name": args[2]})
+		case "revoke":
+			if len(args) < 3 {
+				return fmt.Errorf("usage: openclaw plugins tool revoke <name>")
+			}
+			return rpc(rpcURL, "plugins.tool.revoke", map[string]any{"name": args[2]})
+		default:
+			return fmt.Errorf("unknown plugins tool subcommand %q", args[1])
 		}
 	default:
 		return fmt.Errorf("unknown plugins subcommand %q", args[0])

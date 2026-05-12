@@ -53,6 +53,7 @@ type Server struct {
 	approvals             *runtime.ApprovalQueue
 	push                  *push.Service
 	channelPlugins        *plugins.ChannelPluginRegistry
+	toolPlugins           *plugins.ToolPluginRegistry
 	logs                  *logstore.Store
 	cron                  *cronstore.Store
 	hooks                 *hookstore.Store
@@ -402,6 +403,29 @@ func (s *Server) ChannelPluginRegistry() *plugins.ChannelPluginRegistry {
 	s.authMu.RLock()
 	defer s.authMu.RUnlock()
 	return s.channelPlugins
+}
+
+// Tools returns the gateway's ToolRegistry so external code (e.g. the
+// cmd/openclaw main package) can register additional tools after Server
+// construction. The registry itself is internally locked for concurrent
+// Register/UnregisterByPrefix, so this is safe to call anytime.
+func (s *Server) Tools() *ToolRegistry { return s.tools }
+
+// SetToolPluginRegistry attaches the tool-plugin registry. Used by the
+// plugins.tool.* RPCs to list / approve / revoke. Safe to call after
+// Run() (writes/reads guarded by authMu).
+func (s *Server) SetToolPluginRegistry(reg *plugins.ToolPluginRegistry) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	s.toolPlugins = reg
+}
+
+// ToolPluginRegistry returns the configured tool-plugin registry, or
+// nil if none has been attached (no tool plugins are enabled).
+func (s *Server) ToolPluginRegistry() *plugins.ToolPluginRegistry {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	return s.toolPlugins
 }
 
 // PushService returns the configured push service, or nil if disabled.
@@ -1317,6 +1341,48 @@ func (s *Server) dispatchRPC(
 		reg := s.ChannelPluginRegistry()
 		if reg == nil {
 			return nil, &rpcError{Code: -32001, Message: "channel-plugin registry not configured"}
+		}
+		var p struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.Name) == "" {
+			return nil, &rpcError{Code: -32602, Message: "name is required"}
+		}
+		if err := reg.Revoke(strings.TrimSpace(p.Name)); err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		return map[string]any{"name": p.Name, "state": "pending"}, nil
+	case "plugins.tool.list":
+		reg := s.ToolPluginRegistry()
+		if reg == nil {
+			return map[string]any{"plugins": []any{}}, nil
+		}
+		return map[string]any{"plugins": reg.List()}, nil
+	case "plugins.tool.approve":
+		reg := s.ToolPluginRegistry()
+		if reg == nil {
+			return nil, &rpcError{Code: -32001, Message: "tool-plugin registry not configured"}
+		}
+		var p struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil || strings.TrimSpace(p.Name) == "" {
+			return nil, &rpcError{Code: -32602, Message: "name is required"}
+		}
+		token, err := reg.Approve(strings.TrimSpace(p.Name))
+		if err != nil {
+			return nil, &rpcError{Code: -32000, Message: err.Error()}
+		}
+		// Approved manifests' tools are wired into the gateway's
+		// ToolRegistry at startup; approving at runtime issues the
+		// token but does NOT hot-register the tool (operator should
+		// SIGHUP / restart to pick up newly-approved tools — matches
+		// the channel-plugin RPC's same posture).
+		return map[string]any{"name": p.Name, "token": token, "state": "approved"}, nil
+	case "plugins.tool.revoke":
+		reg := s.ToolPluginRegistry()
+		if reg == nil {
+			return nil, &rpcError{Code: -32001, Message: "tool-plugin registry not configured"}
 		}
 		var p struct {
 			Name string `json:"name"`
