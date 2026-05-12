@@ -147,7 +147,11 @@ func New(
 		// notification with the approval id so the operator can decide
 		// without polling /approvals. Fire-and-forget — push failures
 		// must not block the approval queue.
-		if ps := s.push; ps != nil {
+		//
+		// PushService() takes authMu under RLock so this read is
+		// race-safe against SetPushService writers. The previous
+		// version read s.push directly and tripped -race in CI.
+		if ps := s.PushService(); ps != nil {
 			payload := map[string]any{
 				"kind":      "approval.requested",
 				"id":        req.ID,

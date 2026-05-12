@@ -99,7 +99,10 @@ func (e *EmailChannel) Send(ctx context.Context, message OutboundMessage) error 
 	if err != nil {
 		return fmt.Errorf("email: dial %s: %w", addr, err)
 	}
-	defer client.Quit()
+	// Quit's error is intentionally discarded — we've already committed
+	// the message to the server via DATA + Close above, so a noisy QUIT
+	// (RSET error, slow disconnect, etc.) shouldn't fail the Send.
+	defer func() { _ = client.Quit() }()
 
 	// Opportunistic STARTTLS when the server advertises it and we're not
 	// already on an implicit-TLS connection.
