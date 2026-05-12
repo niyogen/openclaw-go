@@ -728,6 +728,8 @@ func printUsage() {
 	fmt.Println("  openclaw configure whatsapp inbound-mode <webhook>")
 	fmt.Println("  openclaw configure whatsapp webhook-path <path>")
 	fmt.Println("  openclaw configure email enable|host|port|user|password|from <value>")
+	fmt.Println("                          |inbound-enable|imap-host|imap-port|imap-tls")
+	fmt.Println("                          |imap-mailbox|imap-poll <value>")
 	fmt.Println("  openclaw configure signal enable|baseurl|number <value>")
 	fmt.Println("  openclaw configure matrix enable|baseurl|token <value>")
 	fmt.Println("  openclaw configure mattermost enable|baseurl|token <value>")
@@ -782,6 +784,21 @@ func validateGatewayChannelConfig(cfg config.Config) error {
 	// returns nil when its required fields are empty.
 	if cfg.Channels.Email.Enabled && strings.TrimSpace(cfg.Channels.Email.Host) == "" {
 		return fmt.Errorf("email is enabled but channels.email.host is empty")
+	}
+	if cfg.Channels.Email.InboundEnabled {
+		// Username/password are shared with outbound, so check those here
+		// even if outbound is disabled — operators may run inbound-only.
+		if strings.TrimSpace(cfg.Channels.Email.Username) == "" {
+			return fmt.Errorf("email inbound is enabled but channels.email.username is empty")
+		}
+		if strings.TrimSpace(cfg.Channels.Email.Password) == "" {
+			return fmt.Errorf("email inbound is enabled but channels.email.password is empty")
+		}
+		// IMAPHost defaults to outbound Host, so either is fine.
+		if strings.TrimSpace(cfg.Channels.Email.IMAPHost) == "" &&
+			strings.TrimSpace(cfg.Channels.Email.Host) == "" {
+			return fmt.Errorf("email inbound is enabled but neither channels.email.imapHost nor channels.email.host is set")
+		}
 	}
 	if cfg.Channels.Signal.Enabled {
 		if strings.TrimSpace(cfg.Channels.Signal.BaseURL) == "" {
@@ -1211,6 +1228,46 @@ func runGateway(cfg config.Config) error {
 		)
 	}
 
+	// Email inbound: IMAP polling. Decoupled from outbound (Email.Enabled)
+	// so operators can run inbound-only forwarding or outbound-only alerts.
+	// The poller falls back to the SMTP Host when IMAPHost is blank since
+	// many providers (Gmail, Outlook personal) use a parallel imap.<provider>
+	// host that the operator might not remember to set explicitly.
+	if cfg.Channels.Email.InboundEnabled {
+		imapHost := strings.TrimSpace(cfg.Channels.Email.IMAPHost)
+		if imapHost == "" {
+			imapHost = strings.TrimSpace(cfg.Channels.Email.Host)
+		}
+		imapPort := cfg.Channels.Email.IMAPPort
+		if imapPort == 0 {
+			imapPort = 993
+		}
+		mailbox := cfg.Channels.Email.IMAPMailbox
+		if strings.TrimSpace(mailbox) == "" {
+			mailbox = "INBOX"
+		}
+		interval := time.Duration(cfg.Channels.Email.IMAPPollSeconds) * time.Second
+		if interval <= 0 {
+			interval = 30 * time.Second
+		}
+		emailObs := &channels.WebhookInboundConfig{
+			OnHandlerError: func(ch string, err error, attrs map[string]any) {
+				server.RecordInboundHandlerError(ch, err, attrs)
+			},
+		}
+		fetcher := channels.NewIMAPFetcher(
+			imapHost, imapPort, cfg.Channels.Email.IMAPUseTLS,
+			cfg.Channels.Email.Username,
+			cfg.Channels.Email.Password,
+			mailbox,
+		)
+		poller := channels.NewEmailInboundPoller(fetcher, interval)
+		poller.Start(ctx, func(inboundCtx context.Context, inbound channels.InboundMessage) error {
+			_, err := server.HandleInbound(inboundCtx, inbound)
+			return err
+		}, emailObs)
+	}
+
 	// Nostr inbound: start relay subscription if enabled.
 	if cfg.Channels.Nostr.Enabled && strings.TrimSpace(cfg.Channels.Nostr.RelayURL) != "" {
 		go func() {
@@ -1513,7 +1570,7 @@ func saveAndAnnounce(cfg config.Config, format string, a ...any) error {
 
 func runConfigureEmail(cfg config.Config, args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: openclaw configure email enable|host|port|user|password|from <value>")
+		return fmt.Errorf("usage: openclaw configure email enable|host|port|user|password|from|inbound-enable|imap-host|imap-port|imap-tls|imap-mailbox|imap-poll <value>")
 	}
 	switch args[0] {
 	case "enable":
@@ -1542,6 +1599,40 @@ func runConfigureEmail(cfg config.Config, args []string) error {
 	case "from":
 		cfg.Channels.Email.From = strings.TrimSpace(args[1])
 		return saveAndAnnounce(cfg, "channels.email.from set to %q", cfg.Channels.Email.From)
+	case "inbound-enable":
+		v, err := parseBoolArg(args[1])
+		if err != nil {
+			return err
+		}
+		cfg.Channels.Email.InboundEnabled = v
+		return saveAndAnnounce(cfg, "channels.email.inboundEnabled set to %v", v)
+	case "imap-host":
+		cfg.Channels.Email.IMAPHost = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.email.imapHost set to %q", cfg.Channels.Email.IMAPHost)
+	case "imap-port":
+		n, err := strconv.Atoi(args[1])
+		if err != nil || n <= 0 || n >= 65536 {
+			return fmt.Errorf("imap port must be 1-65535 (993 = IMAPS, 143 = plain)")
+		}
+		cfg.Channels.Email.IMAPPort = n
+		return saveAndAnnounce(cfg, "channels.email.imapPort set to %d", n)
+	case "imap-tls":
+		v, err := parseBoolArg(args[1])
+		if err != nil {
+			return err
+		}
+		cfg.Channels.Email.IMAPUseTLS = v
+		return saveAndAnnounce(cfg, "channels.email.imapUseTLS set to %v", v)
+	case "imap-mailbox":
+		cfg.Channels.Email.IMAPMailbox = strings.TrimSpace(args[1])
+		return saveAndAnnounce(cfg, "channels.email.imapMailbox set to %q", cfg.Channels.Email.IMAPMailbox)
+	case "imap-poll":
+		n, err := strconv.Atoi(args[1])
+		if err != nil || n < 5 {
+			return fmt.Errorf("imap-poll seconds must be ≥5")
+		}
+		cfg.Channels.Email.IMAPPollSeconds = n
+		return saveAndAnnounce(cfg, "channels.email.imapPollSeconds set to %d", n)
 	default:
 		return fmt.Errorf("unknown email configure subcommand %q", args[0])
 	}
@@ -2092,13 +2183,32 @@ func runDoctor(cfg config.Config, baseURL string) error {
 		}
 	}
 	if cfg.Channels.Email.Enabled {
-		fmt.Printf("- email: smtp %s:%d (outbound only; inbound IMAP not implemented)\n",
+		fmt.Printf("- email outbound: smtp %s:%d\n",
 			firstNonEmpty(cfg.Channels.Email.Host, "(unset)"), cfg.Channels.Email.Port)
 		if strings.TrimSpace(cfg.Channels.Email.Host) == "" {
 			fmt.Println("- error: email enabled but channels.email.host is empty")
 		}
 		if strings.TrimSpace(cfg.Channels.Email.Username) == "" {
 			fmt.Println("- warning: email username is empty — most SMTP relays require auth")
+		}
+	}
+	if cfg.Channels.Email.InboundEnabled {
+		imapHost := firstNonEmpty(cfg.Channels.Email.IMAPHost, cfg.Channels.Email.Host, "(unset)")
+		port := cfg.Channels.Email.IMAPPort
+		if port == 0 {
+			port = 993
+		}
+		mailbox := cfg.Channels.Email.IMAPMailbox
+		if mailbox == "" {
+			mailbox = "INBOX"
+		}
+		tls := "TLS"
+		if !cfg.Channels.Email.IMAPUseTLS {
+			tls = "plain"
+		}
+		fmt.Printf("- email inbound: imap %s:%d %s mailbox=%s\n", imapHost, port, tls, mailbox)
+		if strings.TrimSpace(cfg.Channels.Email.Username) == "" || strings.TrimSpace(cfg.Channels.Email.Password) == "" {
+			fmt.Println("- error: email inbound enabled but username or password is empty")
 		}
 	}
 	if cfg.Channels.Signal.Enabled {
@@ -2268,10 +2378,11 @@ func post2(targetURL string, payload any) (*http.Response, error) {
 
 // copyDir recursively copies a directory tree.
 // dashboardURL derives the browser URL for the running gateway from config.
-// It targets `/ui/` because that's the path upstream OpenClaw serves the
-// Control UI under; openclaw-go does not yet ship a UI, so the URL currently
-// 404s — but the command is still useful for printing the gateway address
-// and is forward-compatible with a future bundled UI.
+// It targets `/ui/`, which serves the embedded Control Panel
+// (`internal/gateway/ui/index.html`) — auth-guarded by the same bearer/basic
+// rules as `/rpc`. When auth is enabled, the browser will need to supply the
+// token (e.g. via a browser extension setting `Authorization` headers) to
+// see anything beyond the redirect.
 func dashboardURL(cfg config.Config) string {
 	host := strings.TrimSpace(cfg.Gateway.Host)
 	if host == "" {
@@ -2290,7 +2401,9 @@ func dashboardURL(cfg config.Config) string {
 func runDashboard(cfg config.Config) error {
 	url := dashboardURL(cfg)
 	fmt.Println("Dashboard:", url)
-	fmt.Println("(Control UI is not bundled in openclaw-go yet — the gateway will return 404 at /ui/. The URL is shown for forward compatibility and quick gateway address lookup.)")
+	if strings.TrimSpace(cfg.Gateway.AuthToken) != "" {
+		fmt.Println("(Gateway auth is enabled — the browser will need the bearer token to load /ui/.)")
+	}
 	if err := openBrowser(url); err != nil {
 		// Non-fatal: print the hint and exit clean.
 		fmt.Fprintf(os.Stderr, "(could not auto-open browser: %v — open the URL above manually)\n", err)

@@ -517,6 +517,137 @@ func TestRunConfigureEmailSetsAllFields(t *testing.T) {
 	}
 }
 
+func TestRunConfigureEmailIMAPFields(t *testing.T) {
+	load := configurePathHarness(t)
+	cfg := config.Default()
+
+	cases := []struct {
+		args   []string
+		assert func(c config.Config) error
+	}{
+		{[]string{"inbound-enable", "true"}, func(c config.Config) error {
+			if !c.Channels.Email.InboundEnabled {
+				return errors.New("inbound not enabled")
+			}
+			return nil
+		}},
+		{[]string{"imap-host", "imap.example.com"}, func(c config.Config) error {
+			if c.Channels.Email.IMAPHost != "imap.example.com" {
+				return errors.New("imap-host not set")
+			}
+			return nil
+		}},
+		{[]string{"imap-port", "143"}, func(c config.Config) error {
+			if c.Channels.Email.IMAPPort != 143 {
+				return errors.New("imap-port not 143")
+			}
+			return nil
+		}},
+		{[]string{"imap-tls", "false"}, func(c config.Config) error {
+			if c.Channels.Email.IMAPUseTLS {
+				return errors.New("imap-tls not flipped")
+			}
+			return nil
+		}},
+		{[]string{"imap-mailbox", "ARCHIVE"}, func(c config.Config) error {
+			if c.Channels.Email.IMAPMailbox != "ARCHIVE" {
+				return errors.New("imap-mailbox not set")
+			}
+			return nil
+		}},
+		{[]string{"imap-poll", "60"}, func(c config.Config) error {
+			if c.Channels.Email.IMAPPollSeconds != 60 {
+				return errors.New("imap-poll not 60")
+			}
+			return nil
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.args[0], func(t *testing.T) {
+			if err := runConfigureEmail(load(), tc.args); err != nil {
+				t.Fatalf("runConfigureEmail %v: %v", tc.args, err)
+			}
+			if err := tc.assert(load()); err != nil {
+				t.Fatalf("assert: %v", err)
+			}
+		})
+	}
+	_ = cfg
+}
+
+func TestRunConfigureEmailRejectsBadIMAPPort(t *testing.T) {
+	configurePathHarness(t)
+	cfg := config.Default()
+	if err := runConfigureEmail(cfg, []string{"imap-port", "0"}); err == nil {
+		t.Fatal("expected error for imap-port=0")
+	}
+	if err := runConfigureEmail(cfg, []string{"imap-poll", "1"}); err == nil {
+		t.Fatal("expected error for imap-poll=1 (must be >=5)")
+	}
+}
+
+func TestValidateGatewayChannelConfig_EmailInbound(t *testing.T) {
+	cases := []struct {
+		name      string
+		mutate    func(c *config.Config)
+		wantError string
+	}{
+		{
+			"inbound enabled without username",
+			func(c *config.Config) {
+				c.Channels.Email.InboundEnabled = true
+				c.Channels.Email.Host = "smtp.example.com"
+				c.Channels.Email.Password = "pw"
+			},
+			"username",
+		},
+		{
+			"inbound enabled without password",
+			func(c *config.Config) {
+				c.Channels.Email.InboundEnabled = true
+				c.Channels.Email.Host = "smtp.example.com"
+				c.Channels.Email.Username = "u"
+			},
+			"password",
+		},
+		{
+			"inbound enabled without any host",
+			func(c *config.Config) {
+				c.Channels.Email.InboundEnabled = true
+				c.Channels.Email.Username = "u"
+				c.Channels.Email.Password = "pw"
+				// Both Host and IMAPHost left empty.
+			},
+			"imapHost",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			tc.mutate(&cfg)
+			err := validateGatewayChannelConfig(cfg)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error %q should mention %q", err.Error(), tc.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateGatewayChannelConfig_EmailInboundHappyWithSmtpHostFallback(t *testing.T) {
+	// IMAPHost can be empty if outbound Host is set — fetcher falls back.
+	cfg := config.Default()
+	cfg.Channels.Email.InboundEnabled = true
+	cfg.Channels.Email.Host = "smtp.example.com" // also used as IMAP host fallback
+	cfg.Channels.Email.Username = "u"
+	cfg.Channels.Email.Password = "pw"
+	if err := validateGatewayChannelConfig(cfg); err != nil {
+		t.Fatalf("expected validation to pass; got %v", err)
+	}
+}
+
 func TestRunConfigureEmailRejectsBadPort(t *testing.T) {
 	configurePathHarness(t)
 	cfg := config.Default()

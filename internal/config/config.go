@@ -114,15 +114,31 @@ type NostrChannelConfig struct {
 	Pubkey   string `json:"pubkey"`
 }
 
-// EmailChannelConfig configures the SMTP-outbound email channel.
-// Port 465 = implicit TLS, 587 = STARTTLS. Empty Host disables the channel.
+// EmailChannelConfig configures the SMTP-outbound email channel and (when
+// InboundEnabled is true) the IMAP-inbound poller.
+//
+// Outbound: Port 465 = implicit TLS, 587 = STARTTLS. Empty Host disables.
+//
+// Inbound: connects to IMAPHost:IMAPPort using the same Username/Password
+// as outbound (most providers issue a single credential for both). Polls
+// IMAPMailbox (default "INBOX") every IMAPPollSeconds seconds for unseen
+// messages and dispatches each to the agent. Set InboundEnabled=false to
+// run outbound-only.
 type EmailChannelConfig struct {
 	Enabled  bool   `json:"enabled"`
 	Host     string `json:"host"`     // e.g. "smtp.gmail.com"
 	Port     int    `json:"port"`     // 587 (STARTTLS, default) or 465 (TLS)
-	Username string `json:"username"` // SMTP AUTH user (usually the From address)
+	Username string `json:"username"` // SMTP+IMAP AUTH user (usually the From address)
 	Password string `json:"password"` // app-password preferred over account password
 	From     string `json:"from"`     // RFC 5322 From; defaults to Username when empty
+
+	// Inbound (IMAP) — optional. Outbound and inbound can run independently.
+	InboundEnabled  bool   `json:"inboundEnabled"`
+	IMAPHost        string `json:"imapHost"`        // typically "imap.<provider>"
+	IMAPPort        int    `json:"imapPort"`        // 993 (TLS, default) or 143 (plain)
+	IMAPUseTLS      bool   `json:"imapUseTLS"`      // true for IMAPS; default true
+	IMAPMailbox     string `json:"imapMailbox"`     // default "INBOX"
+	IMAPPollSeconds int    `json:"imapPollSeconds"` // default 30; clamped to ≥5
 }
 
 // SignalChannelConfig configures outbound delivery via signal-cli-rest-api.
@@ -266,8 +282,12 @@ func Default() Config {
 				Enabled: false,
 			},
 			Email: EmailChannelConfig{
-				Enabled: false,
-				Port:    587,
+				Enabled:         false,
+				Port:            587,
+				IMAPPort:        993,
+				IMAPUseTLS:      true,
+				IMAPMailbox:     "INBOX",
+				IMAPPollSeconds: 30,
 			},
 			Signal: SignalChannelConfig{
 				Enabled: false,
