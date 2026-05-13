@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,6 +190,56 @@ func TestMessagePipelineFiresMessageHooks(t *testing.T) {
 	// flow exists, not that every hook fires.
 	if len(cap.Sent()) == 0 {
 		t.Fatal("captureChannel got no sends — assistant reply never reached the router")
+	}
+}
+
+// TestSignalInboundFlowsThroughGateway pins the wiring that the runGateway
+// signal-inbound block sets up: SignalHTTPFetcher → SignalInboundPoller →
+// Server.HandleInbound → session store. The poller normally lives in
+// cmd/openclaw, but the wiring it produces (poller → HandleInbound) is what
+// matters for end-to-end behaviour, so we exercise it here against a real
+// httptest /v1/receive sidecar.
+func TestSignalInboundFlowsThroughGateway(t *testing.T) {
+	cap := &captureChannel{name: "fake"}
+	s := buildIntegrationServer(t, cap)
+
+	// signal-cli-rest-api fake: returns one envelope on the first call,
+	// then empties forever so the poller keeps long-polling without busy-
+	// looping. The second-call empty body also covers the "200 with no
+	// content on long-poll timeout" branch in the production fetcher.
+	var calls atomic.Int32
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			_, _ = w.Write([]byte(`[{"envelope":{"source":"+15551112222","timestamp":1700000000000,"dataMessage":{"message":"hi from signal"}}}]`))
+			return
+		}
+		w.WriteHeader(http.StatusOK) // empty body == no new messages
+	}))
+	t.Cleanup(sidecar.Close)
+
+	fetcher := channels.NewSignalHTTPFetcher(sidecar.URL, "+15559999999", 2*time.Second)
+	poller := channels.NewSignalInboundPoller(fetcher)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	poller.Start(ctx, func(ic context.Context, im channels.InboundMessage) error {
+		_, err := s.HandleInbound(ic, im)
+		return err
+	}, nil)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := s.store.Get("signal:+15551112222"); ok {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	sess, ok := s.store.Get("signal:+15551112222")
+	if !ok {
+		t.Fatalf("signal inbound never reached the session store after 5s (sidecar calls=%d)", calls.Load())
+	}
+	if len(sess.Messages) < 1 || sess.Messages[0].Content != "hi from signal" {
+		t.Fatalf("first message should be the inbound user prompt; got %+v", sess.Messages)
 	}
 }
 

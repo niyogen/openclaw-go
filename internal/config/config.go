@@ -163,12 +163,19 @@ type EmailChannelConfig struct {
 	IMAPPollSeconds int    `json:"imapPollSeconds"` // default 30; clamped to ≥5
 }
 
-// SignalChannelConfig configures outbound delivery via signal-cli-rest-api.
-// The operator runs that sidecar separately; we just POST to its /v2/send.
+// SignalChannelConfig configures both outbound (POST /v2/send) and inbound
+// (long-poll GET /v1/receive/{number}) against signal-cli-rest-api. The
+// operator runs that sidecar separately. Inbound is opt-in via
+// InboundEnabled; outbound runs whenever Enabled=true and BaseURL+Number
+// are set.
 type SignalChannelConfig struct {
 	Enabled bool   `json:"enabled"`
 	BaseURL string `json:"baseUrl"` // e.g. "http://127.0.0.1:8080"
 	Number  string `json:"number"`  // bot's own number, "+15551234567"
+
+	// Inbound (long-poll) — optional. Independent of outbound.
+	InboundEnabled        bool `json:"inboundEnabled"`
+	ReceiveTimeoutSeconds int  `json:"receiveTimeoutSeconds"` // default 5; clamped 1-60
 }
 
 // MatrixChannelConfig configures outbound to a Matrix homeserver via the
@@ -312,7 +319,8 @@ func Default() Config {
 				IMAPPollSeconds: 30,
 			},
 			Signal: SignalChannelConfig{
-				Enabled: false,
+				Enabled:               false,
+				ReceiveTimeoutSeconds: 5,
 			},
 			Matrix: MatrixChannelConfig{
 				Enabled: false,

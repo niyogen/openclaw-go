@@ -734,7 +734,7 @@ func printUsage() {
 	fmt.Println("  openclaw configure email enable|host|port|user|password|from <value>")
 	fmt.Println("                          |inbound-enable|imap-host|imap-port|imap-tls")
 	fmt.Println("                          |imap-mailbox|imap-poll <value>")
-	fmt.Println("  openclaw configure signal enable|baseurl|number <value>")
+	fmt.Println("  openclaw configure signal enable|baseurl|number|inbound-enable|receive-timeout <value>")
 	fmt.Println("  openclaw configure matrix enable|baseurl|token <value>")
 	fmt.Println("  openclaw configure mattermost enable|baseurl|token <value>")
 	fmt.Println("  openclaw logs [<level>]")
@@ -812,6 +812,16 @@ func validateGatewayChannelConfig(cfg config.Config) error {
 		}
 		if strings.TrimSpace(cfg.Channels.Signal.Number) == "" {
 			return fmt.Errorf("signal is enabled but channels.signal.number is empty (the bot's own Signal number)")
+		}
+	}
+	if cfg.Channels.Signal.InboundEnabled {
+		// Inbound shares the sidecar credentials with outbound; require
+		// both even when outbound is disabled so the poller can connect.
+		if strings.TrimSpace(cfg.Channels.Signal.BaseURL) == "" {
+			return fmt.Errorf("signal inbound is enabled but channels.signal.baseUrl is empty")
+		}
+		if strings.TrimSpace(cfg.Channels.Signal.Number) == "" {
+			return fmt.Errorf("signal inbound is enabled but channels.signal.number is empty")
 		}
 	}
 	if cfg.Channels.Matrix.Enabled {
@@ -1384,6 +1394,32 @@ func runGateway(cfg config.Config) error {
 		}, emailObs)
 	}
 
+	// Signal inbound: long-poll signal-cli-rest-api's /v1/receive/{number}.
+	// Decoupled from outbound (Channels.Signal.Enabled) so an operator can
+	// run inbound-only forwarding — the validator above requires baseURL +
+	// number on both sides regardless.
+	if cfg.Channels.Signal.InboundEnabled {
+		timeout := time.Duration(cfg.Channels.Signal.ReceiveTimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		sigObs := &channels.WebhookInboundConfig{
+			OnHandlerError: func(ch string, err error, attrs map[string]any) {
+				server.RecordInboundHandlerError(ch, err, attrs)
+			},
+		}
+		fetcher := channels.NewSignalHTTPFetcher(
+			cfg.Channels.Signal.BaseURL,
+			cfg.Channels.Signal.Number,
+			timeout,
+		)
+		poller := channels.NewSignalInboundPoller(fetcher)
+		poller.Start(ctx, func(inboundCtx context.Context, inbound channels.InboundMessage) error {
+			_, err := server.HandleInbound(inboundCtx, inbound)
+			return err
+		}, sigObs)
+	}
+
 	// Nostr inbound: start relay subscription if enabled.
 	if cfg.Channels.Nostr.Enabled && strings.TrimSpace(cfg.Channels.Nostr.RelayURL) != "" {
 		go func() {
@@ -1756,7 +1792,7 @@ func runConfigureEmail(cfg config.Config, args []string) error {
 
 func runConfigureSignal(cfg config.Config, args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: openclaw configure signal enable|baseurl|number <value>")
+		return fmt.Errorf("usage: openclaw configure signal enable|baseurl|number|inbound-enable|receive-timeout <value>")
 	}
 	switch args[0] {
 	case "enable":
@@ -1772,6 +1808,20 @@ func runConfigureSignal(cfg config.Config, args []string) error {
 	case "number":
 		cfg.Channels.Signal.Number = strings.TrimSpace(args[1])
 		return saveAndAnnounce(cfg, "channels.signal.number set to %q", cfg.Channels.Signal.Number)
+	case "inbound-enable":
+		v, err := parseBoolArg(args[1])
+		if err != nil {
+			return err
+		}
+		cfg.Channels.Signal.InboundEnabled = v
+		return saveAndAnnounce(cfg, "channels.signal.inboundEnabled set to %v", v)
+	case "receive-timeout":
+		n, err := strconv.Atoi(args[1])
+		if err != nil || n < 1 || n > 60 {
+			return fmt.Errorf("receive-timeout seconds must be between 1 and 60")
+		}
+		cfg.Channels.Signal.ReceiveTimeoutSeconds = n
+		return saveAndAnnounce(cfg, "channels.signal.receiveTimeoutSeconds set to %d", n)
 	default:
 		return fmt.Errorf("unknown signal configure subcommand %q", args[0])
 	}
@@ -2360,9 +2410,19 @@ func runDoctor(cfg config.Config, baseURL string) error {
 		}
 	}
 	if cfg.Channels.Signal.Enabled {
-		fmt.Printf("- signal: sidecar %s (outbound only)\n", firstNonEmpty(cfg.Channels.Signal.BaseURL, "(unset)"))
+		direction := "outbound only"
+		if cfg.Channels.Signal.InboundEnabled {
+			direction = "outbound + inbound (long-poll)"
+		}
+		fmt.Printf("- signal: sidecar %s (%s)\n", firstNonEmpty(cfg.Channels.Signal.BaseURL, "(unset)"), direction)
 		if strings.TrimSpace(cfg.Channels.Signal.BaseURL) == "" || strings.TrimSpace(cfg.Channels.Signal.Number) == "" {
 			fmt.Println("- error: signal enabled but baseUrl or number is empty")
+		}
+	} else if cfg.Channels.Signal.InboundEnabled {
+		fmt.Printf("- signal: sidecar %s (inbound only)\n", firstNonEmpty(cfg.Channels.Signal.BaseURL, "(unset)"))
+		fmt.Println("- warning: signal outbound is disabled — agent replies won't deliver back to Signal (route replies via another enabled channel)")
+		if strings.TrimSpace(cfg.Channels.Signal.BaseURL) == "" || strings.TrimSpace(cfg.Channels.Signal.Number) == "" {
+			fmt.Println("- error: signal inbound enabled but baseUrl or number is empty")
 		}
 	}
 	if cfg.Channels.Matrix.Enabled {

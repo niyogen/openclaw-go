@@ -675,10 +675,33 @@ func TestRunConfigureSignal(t *testing.T) {
 	if err := runConfigureSignal(load(), []string{"number", "+15551112222"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := runConfigureSignal(load(), []string{"inbound-enable", "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runConfigureSignal(load(), []string{"receive-timeout", "20"}); err != nil {
+		t.Fatal(err)
+	}
 	got := load()
 	if !got.Channels.Signal.Enabled || got.Channels.Signal.BaseURL != "http://127.0.0.1:8080" ||
 		got.Channels.Signal.Number != "+15551112222" {
 		t.Fatalf("signal config not persisted correctly: %+v", got.Channels.Signal)
+	}
+	if !got.Channels.Signal.InboundEnabled {
+		t.Errorf("inbound-enable not persisted: %+v", got.Channels.Signal)
+	}
+	if got.Channels.Signal.ReceiveTimeoutSeconds != 20 {
+		t.Errorf("receive-timeout=20 not persisted, got %d", got.Channels.Signal.ReceiveTimeoutSeconds)
+	}
+
+	// Out-of-range receive-timeout rejected.
+	if err := runConfigureSignal(load(), []string{"receive-timeout", "0"}); err == nil {
+		t.Error("expected error for receive-timeout=0")
+	}
+	if err := runConfigureSignal(load(), []string{"receive-timeout", "61"}); err == nil {
+		t.Error("expected error for receive-timeout=61")
+	}
+	if err := runConfigureSignal(load(), []string{"receive-timeout", "abc"}); err == nil {
+		t.Error("expected error for non-numeric receive-timeout")
 	}
 }
 
@@ -789,6 +812,22 @@ func TestValidateGatewayChannelConfig_NewChannels(t *testing.T) {
 				c.Channels.Signal.BaseURL = "http://localhost:8080"
 			},
 			"signal.number",
+		},
+		{
+			"signal inbound enabled without baseUrl (outbound disabled)",
+			func(c *config.Config) {
+				c.Channels.Signal.InboundEnabled = true
+				c.Channels.Signal.Number = "+15551112222"
+			},
+			"signal inbound is enabled but channels.signal.baseUrl",
+		},
+		{
+			"signal inbound enabled without number (outbound disabled)",
+			func(c *config.Config) {
+				c.Channels.Signal.InboundEnabled = true
+				c.Channels.Signal.BaseURL = "http://localhost:8080"
+			},
+			"signal inbound is enabled but channels.signal.number",
 		},
 		{
 			"matrix enabled without baseUrl",
