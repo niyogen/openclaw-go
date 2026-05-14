@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -248,9 +249,20 @@ func handleExecApprovalsSet(_ *Server, ctx context.Context, _ json.RawMessage) (
 // the upstream shape, which uses `.key` as the primary identifier
 // (we use `.id`). studio's hydration reads .key to scope agents to
 // sessions, so the rename is load-bearing.
+//
+// Sorted by UpdatedAt DESCENDING with ID as the lexicographic
+// tiebreaker — Store.List() iterates a map so its native order is
+// non-deterministic. Studio's UI shows most-recently-active first
+// and may rely on the array order for that affordance.
 func handleSessionsList(s *Server, ctx context.Context, _ json.RawMessage) (any, *rpcError) {
 	_ = ctx
 	all := s.store.List()
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].UpdatedAt.Equal(all[j].UpdatedAt) {
+			return all[i].UpdatedAt.After(all[j].UpdatedAt)
+		}
+		return all[i].ID < all[j].ID
+	})
 	out := make([]map[string]any, 0, len(all))
 	for _, sess := range all {
 		entry := map[string]any{

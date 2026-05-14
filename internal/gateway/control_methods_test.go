@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -458,6 +457,3 @@ func TestTranslateGatewayEventUnknownDropped(t *testing.T) {
 		t.Errorf("expected unknown event to be dropped, got %q", name)
 	}
 }
-
-var _ = time.Now
-var _ = json.RawMessage{}
