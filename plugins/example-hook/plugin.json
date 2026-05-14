@@ -1,0 +1,16 @@
+{
+  "name": "example-hook",
+  "version": "0.1.0",
+  "description": "Reference hook plugin demonstrating pkg/hookplugin. Logs every received envelope to stderr.",
+  "hooks": [
+    {"event": "gateway.started",     "endpoint": "http://127.0.0.1:9301/hook/gateway-started"},
+    {"event": "gateway.stopping",    "endpoint": "http://127.0.0.1:9301/hook/gateway-stopping"},
+    {"event": "session.created",     "endpoint": "http://127.0.0.1:9301/hook/session-created"},
+    {"event": "message.received",    "endpoint": "http://127.0.0.1:9301/hook/message-received"},
+    {"event": "message.sent",        "endpoint": "http://127.0.0.1:9301/hook/message-sent"},
+    {"event": "agent.run.started",   "endpoint": "http://127.0.0.1:9301/hook/agent-run-started"},
+    {"event": "agent.run.complete",  "endpoint": "http://127.0.0.1:9301/hook/agent-run-complete"},
+    {"event": "tool.invoked",        "endpoint": "http://127.0.0.1:9301/hook/tool-invoked"},
+    {"event": "approval.requested",  "endpoint": "http://127.0.0.1:9301/hook/approval-requested"}
+  ]
+}

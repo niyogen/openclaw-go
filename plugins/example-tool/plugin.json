@@ -1,0 +1,22 @@
+{
+  "name": "example-tool",
+  "version": "0.1.0",
+  "description": "Reference tool plugin demonstrating pkg/toolplugin. Exposes example_echo, example_now, example_add.",
+  "tools": [
+    {
+      "name": "example_echo",
+      "description": "Echo back the arguments map verbatim. Smoke-tests the wiring.",
+      "endpoint": "http://127.0.0.1:9201/tool/example_echo"
+    },
+    {
+      "name": "example_now",
+      "description": "Return the plugin's current UTC time as RFC3339.",
+      "endpoint": "http://127.0.0.1:9201/tool/example_now"
+    },
+    {
+      "name": "example_add",
+      "description": "Sum two numbers. Args: {\"a\": number, \"b\": number}. Errors on missing/non-numeric input.",
+      "endpoint": "http://127.0.0.1:9201/tool/example_add"
+    }
+  ]
+}

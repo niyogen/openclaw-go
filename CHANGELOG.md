@@ -7,7 +7,14 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Reference example plugins**: `plugins/example-tool/` and
+  `plugins/example-hook/`. Tiny runnable plugins (~30 lines of Go each,
+  plus manifest + README) demonstrating the `pkg/toolplugin` and
+  `pkg/hookplugin` SDKs end-to-end. Smoke-testable against a real
+  gateway in ~1 minute following the recipe in each plugin's README.
+  Closes one of the v0.5.x follow-ups deferred at v0.5.0 cut.
 
 ## [0.5.0] - 2026-05-12
 
