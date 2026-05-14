@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -816,12 +815,21 @@ func handleExecApprovalResolve(s *Server, ctx context.Context, params json.RawMe
 // the UI never learns about new chat messages, runs, or session
 // changes — the only path is full re-poll on user action.
 //
-// Translation rules (Phase 2 scope):
-//   - assistant message → upstream `chat` event, state=final
-//   - user message → emit `chat` state=delta (studio already saw it
-//     via the chat.send response, but echoing keeps projection state
-//     consistent)
-//   - everything else → ignored for now (Phase 4 expands coverage)
+// Translation rules (current Phase 2 scope — see
+// translateGatewayEvent for the exact mapping):
+//
+//   - SessionMessage / AgentReply → upstream `presence` event,
+//     which studio classifies as summary-refresh. Triggers studio
+//     to refetch preview/history, surfacing new chat content.
+//   - SessionCreated / SessionDeleted → upstream `sessions.created`
+//     / `sessions.deleted` events.
+//   - everything else → dropped.
+//
+// The fully correct shape for chat is a run lifecycle
+// (`agent.run.started` → `chat` deltas → `chat` final with runId).
+// That requires a run-tracker in openclaw-go (Phase 4). `presence`
+// is a working approximation today; the page may need a reload to
+// see the very latest assistant reply on tight timing windows.
 func (s *Server) fanoutControlEvents(ctx context.Context, seq *int64, writeFrame func(controlFrame) error) {
 	evCh, unsub := s.bus.Subscribe("")
 	defer unsub()
@@ -837,9 +845,7 @@ func (s *Server) fanoutControlEvents(ctx context.Context, seq *int64, writeFrame
 			if eventName == "" {
 				continue
 			}
-			// atomic add to keep concurrent fanouts in distinct
-			// connections (none today, but free invariant) clean.
-			nextSeq := atomicAddInt64(seq, 1)
+			nextSeq := atomic.AddInt64(seq, 1)
 			_ = writeFrame(controlFrame{
 				Type:    "event",
 				Event:   eventName,
@@ -888,11 +894,3 @@ func translateGatewayEvent(ev GatewayEvent) (string, any) {
 		return "", nil
 	}
 }
-
-// atomicAddInt64 is a tiny wrapper so callers don't have to import
-// sync/atomic at the call site.
-func atomicAddInt64(addr *int64, delta int64) int64 {
-	return atomic.AddInt64(addr, delta)
-}
-
-var _ = fmt.Sprintf
