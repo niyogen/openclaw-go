@@ -330,18 +330,29 @@ func (s *Server) handleControlConnect(frame controlFrame, signalConnected func()
 // no-op studio fires to probe liveness). Every other method returns
 // METHOD_NOT_FOUND so missing-method behaviour is consistent and
 // debuggable. Phase 2+ will add real method handlers here.
-func (s *Server) dispatchControlMethod(_ context.Context, frame controlFrame, writeFrame func(controlFrame) error) {
+//
+// ctx is the request context inherited from the HTTP request that
+// upgraded into this WebSocket. Phase 2 handlers that perform I/O
+// (HTTP, DB, file, channel dispatch) MUST honor ctx so client
+// disconnects propagate cancellation — otherwise a closed connection
+// leaves blocked goroutines hanging on long-running work. The wake
+// handler below is fully synchronous so it does not need ctx, but
+// the parameter is named (not `_`) so the obligation is visible to
+// every future contributor adding a case to this switch.
+func (s *Server) dispatchControlMethod(ctx context.Context, frame controlFrame, writeFrame func(controlFrame) error) {
+	_ = ctx // Phase 1: no handler uses ctx yet. Phase 2+ MUST.
 	switch frame.Method {
 	case "wake":
 		// Studio's lib/gateway/agentConfig.ts calls wake({}) as a
 		// heartbeat. Returning { ok: true, woke: true } satisfies its
-		// HeartbeatWakeResult type.
+		// HeartbeatWakeResult type. RFC3339Nano matches the precision
+		// other openclaw-go endpoints use for time fields.
 		ok := true
 		_ = writeFrame(controlFrame{
 			Type:    "res",
 			ID:      frame.ID,
 			OK:      &ok,
-			Payload: map[string]any{"ok": true, "woke": true, "time": time.Now().UTC().Format(time.RFC3339)},
+			Payload: map[string]any{"ok": true, "woke": true, "time": time.Now().UTC().Format(time.RFC3339Nano)},
 		})
 	default:
 		_ = writeFrame(controlErrorResponse(frame.ID, "METHOD_NOT_FOUND",

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -254,9 +255,15 @@ func TestControlWSUnknownMethodReturnsNotFound(t *testing.T) {
 }
 
 func TestControlWSConcurrentRequests(t *testing.T) {
-	// Studio's bootstrap fires ~6 methods in parallel — verify our
-	// dispatcher handles concurrent inflight requests without
-	// interleaving frames or deadlocking.
+	// Studio's bootstrap fires ~6 methods in parallel. We fire 40 —
+	// deliberately MORE than controlMaxConcurrentRequests (32) so the
+	// per-connection semaphore's wait-on-cap branch is exercised. With
+	// 40 > 32 the dispatcher must block at least 8 acquires until
+	// earlier handlers release their slots. The test passes if all 40
+	// responses arrive without deadlock or dropped frames.
+	if controlMaxConcurrentRequests < 32 {
+		t.Skipf("test assumes default cap >= 32, got %d", controlMaxConcurrentRequests)
+	}
 	s := buildTestServer(t, "")
 	ts := httptest.NewServer(s.mux)
 	t.Cleanup(ts.Close)
@@ -266,16 +273,14 @@ func TestControlWSConcurrentRequests(t *testing.T) {
 	writeReq(t, conn, "c1", "connect", buildConnectParams(""))
 	_ = readFrame(t, conn)
 
-	// Fire 10 wake calls back-to-back without reading; reader runs
-	// concurrently below.
-	const n = 10
+	const n = 40
 	var wg sync.WaitGroup
 	received := make(map[string]bool, n)
 	var rmu sync.Mutex
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		for i := range n {
 			var f controlFrame
 			if err := conn.ReadJSON(&f); err != nil {
@@ -289,11 +294,17 @@ func TestControlWSConcurrentRequests(t *testing.T) {
 	}()
 
 	for i := range n {
-		writeReq(t, conn, "p"+strings.Repeat("x", i+1), "wake", map[string]any{})
+		writeReq(t, conn, fmt.Sprintf("p%d", i), "wake", map[string]any{})
 	}
 	wg.Wait()
 	if len(received) != n {
 		t.Fatalf("expected %d responses, got %d (%v)", n, len(received), received)
+	}
+	// Verify each id we sent came back exactly once.
+	for i := range n {
+		if !received[fmt.Sprintf("p%d", i)] {
+			t.Errorf("missing response for id p%d", i)
+		}
 	}
 }
 
