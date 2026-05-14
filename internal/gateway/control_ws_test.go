@@ -258,10 +258,12 @@ func TestControlWSUnknownMethodReturnsNotFound(t *testing.T) {
 	_ = readFrame(t, conn)
 	writeReq(t, conn, "c1", "connect", buildConnectParams(""))
 	_ = readFrame(t, conn)
-	// Use a method we deliberately won't implement so the test stays
-	// valid as the handler table grows. agents.list (used here in the
-	// original test) was wired in Phase 2; needed a swap.
-	writeReq(t, conn, "x1", "config.set", map[string]any{})
+	// Use a guaranteed-fake method name so the test stays valid as
+	// the handler table grows. Earlier iterations used agents.list
+	// then config.set as the probe; both got implemented and the
+	// test broke. The leading "_not_" prefix is a reserved namespace
+	// that real upstream openclaw methods never use.
+	writeReq(t, conn, "x1", "_not_a_real_method", map[string]any{})
 	f := readFrame(t, conn)
 	if f.Error == nil || f.Error.Code != "METHOD_NOT_FOUND" {
 		t.Fatalf("expected METHOD_NOT_FOUND, got %+v", f.Error)

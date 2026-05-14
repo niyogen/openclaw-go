@@ -151,6 +151,11 @@ func (s *Server) handleControlWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sequence counter for server-pushed events. studio's adapter
+	// tracks .seq per connection so it can detect gaps; we just
+	// increment monotonically.
+	var eventSeq int64
+
 	// connected gates whether incoming frames are treated as method
 	// requests. Until the connect handshake succeeds, only `connect`
 	// is accepted; everything else is dropped.
@@ -168,6 +173,12 @@ func (s *Server) handleControlWS(w http.ResponseWriter, r *http.Request) {
 		connectOnce.Do(func() {
 			connected.Store(true)
 			close(connectDone)
+			// Once connected, start fanning out gateway events to this
+			// client as upstream-shape `event` frames. Studio's adapter
+			// pipes these into its projection store, which the browser
+			// SSE channel replays — that's how the UI knows when an
+			// assistant reply has arrived without polling.
+			go s.fanoutControlEvents(r.Context(), &eventSeq, writeFrame)
 		})
 	}
 
@@ -352,8 +363,42 @@ type controlMethodHandler func(s *Server, ctx context.Context, params json.RawMe
 // are intentionally absent here — they'll land in Phase 3 with
 // dedicated handlers.
 var controlMethodHandlers = map[string]controlMethodHandler{
-	"wake":        handleWake,
-	"agents.list": handleAgentsList,
+	// Protocol-level
+	"wake":   handleWake,
+	"status": handleStatus,
+	// Agents CRUD + workspace files
+	"agents.list":      handleAgentsList,
+	"agents.create":    handleAgentsCreate,
+	"agents.update":    handleAgentsUpdate,
+	"agents.delete":    handleAgentsDelete,
+	"agents.files.get": handleAgentsFilesGet,
+	"agents.files.set": handleAgentsFilesSet,
+	// Sessions
+	"sessions.list":    handleSessionsList,
+	"sessions.preview": handleSessionsPreview,
+	"sessions.reset":   handleSessionsReset,
+	"sessions.patch":   handleSessionsPatch,
+	// Cron
+	"cron.list":   handleCronList,
+	"cron.add":    handleCronAdd,
+	"cron.run":    handleCronRun,
+	"cron.remove": handleCronRemove,
+	// Config
+	"config.get":   handleConfigGet,
+	"config.set":   handleConfigSet,
+	"config.patch": handleConfigPatch,
+	// Models
+	"models.list": handleModelsList,
+	// Chat
+	"chat.history": handleChatHistory,
+	"chat.send":    handleChatSend,
+	"chat.abort":   handleChatAbort,
+	// Agent runtime
+	"agent.wait": handleAgentWait,
+	// Exec approvals
+	"exec.approvals.get":    handleExecApprovalsGet,
+	"exec.approvals.set":    handleExecApprovalsSet,
+	"exec.approval.resolve": handleExecApprovalResolve,
 }
 
 // dispatchControlMethod handles a request frame AFTER the connect
