@@ -1,8 +1,11 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -85,6 +88,23 @@ func (r *statusRecorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack forwards to the underlying ResponseWriter's hijacker so
+// WebSocket upgrades (gorilla/websocket) can take over the connection
+// even when the trace middleware has wrapped the writer.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := r.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, errors.New("response writer does not implement http.Hijacker")
+}
+
+// Unwrap exposes the underlying ResponseWriter so http.NewResponseController
+// can reach through this wrapper to call Hijack/Flush/SetWriteDeadline/etc.
+// Required by Go 1.20+ middleware conventions.
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
 }
 
 // TraceIDFromContext returns the request trace ID, or "" if not present.

@@ -9,12 +9,36 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 
 ### Added
 
+- **Upstream-compatible WebSocket endpoint** at `/control/ws`
+  (`internal/gateway/control_ws.go`). Speaks the upstream openclaw
+  protocol shape (`connect.challenge` → `req method=connect` → `res
+  ok=true`, then `{type:"req"|"res"|"event", id, method, params,
+  payload, ok, error}` framing) so frontends written against upstream
+  openclaw — openclaw-studio, openclaw-nerve, native apps — can
+  connect to openclaw-go unmodified. Phase 1 of the
+  upstream-protocol-compat work: connect handshake + `wake` heartbeat
+  wired; every other method returns `METHOD_NOT_FOUND` until later
+  phases register handlers. Grants all 5 operator scopes
+  unconditionally (scope-enforced authz is a separate parity item).
+  Coexists with the existing `/ws` endpoint; existing clients
+  unaffected.
 - **Reference example plugins**: `plugins/example-tool/` and
   `plugins/example-hook/`. Tiny runnable plugins (~30 lines of Go each,
   plus manifest + README) demonstrating the `pkg/toolplugin` and
   `pkg/hookplugin` SDKs end-to-end. Smoke-testable against a real
   gateway in ~1 minute following the recipe in each plugin's README.
   Closes one of the v0.5.x follow-ups deferred at v0.5.0 cut.
+
+### Fixed
+
+- **`statusRecorder` in `internal/gateway/trace.go` now forwards
+  `http.Hijacker`** and exposes `Unwrap()`. Previously the trace
+  middleware wrapped the response writer in a type that did not
+  implement `http.Hijacker`, which silently broke WebSocket upgrades
+  through the production handler chain — gorilla's upgrader returns
+  HTTP 500 when the writer is not hijackable. Existing unit tests
+  served from `s.mux` directly so the bug never surfaced in CI; live
+  smoke testing of the new `/control/ws` endpoint exposed it.
 
 ## [0.5.0] - 2026-05-12
 

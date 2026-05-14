@@ -667,6 +667,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /web/login/{nonce}", cors(s.handleWebLoginPage))
 	s.mux.HandleFunc("/rpc", cors(s.withAuth(s.withRateLimit(withBodyLimit(s.handleRPC)))))
 	s.mux.HandleFunc("/ws", s.withAuth(s.handleWS))
+	// /control/ws speaks upstream openclaw's WebSocket protocol so
+	// frontends written against upstream (studio, nerve, native apps)
+	// can drop in. NOT wrapped in withAuth — the token lives inside
+	// the connect handshake message body per the upstream contract.
+	s.mux.HandleFunc("/control/ws", s.handleControlWS)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
