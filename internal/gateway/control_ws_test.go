@@ -12,7 +12,15 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"openclaw-go/internal/agents"
 )
+
+// agentsImport is a tiny constructor for AgentProfile in tests. Kept
+// local so test files don't have to repeat the field-name plumbing.
+func agentsImport(id, name string) agents.AgentProfile {
+	return agents.AgentProfile{ID: id, Name: name}
+}
 
 // ctlDial upgrades an httptest server URL to ws:// and connects to
 // /control/ws. Returns the WebSocket conn; t.Cleanup closes it.
@@ -247,7 +255,10 @@ func TestControlWSUnknownMethodReturnsNotFound(t *testing.T) {
 	_ = readFrame(t, conn)
 	writeReq(t, conn, "c1", "connect", buildConnectParams(""))
 	_ = readFrame(t, conn)
-	writeReq(t, conn, "x1", "agents.list", map[string]any{})
+	// Use a method we deliberately won't implement so the test stays
+	// valid as the handler table grows. agents.list (used here in the
+	// original test) was wired in Phase 2; needed a swap.
+	writeReq(t, conn, "x1", "config.set", map[string]any{})
 	f := readFrame(t, conn)
 	if f.Error == nil || f.Error.Code != "METHOD_NOT_FOUND" {
 		t.Fatalf("expected METHOD_NOT_FOUND, got %+v", f.Error)
@@ -398,6 +409,109 @@ func TestControlWSEmptyIDRejected(t *testing.T) {
 	}
 	if strings.Contains(f.Error.Message, "method is required") {
 		t.Fatalf("id-check should fire before method-check; got %q", f.Error.Message)
+	}
+}
+
+// connectFor returns a freshly-handshaked /control/ws connection on the
+// supplied test server. Reads challenge, sends connect, reads ok.
+// Tests that exercise post-connect methods should use this to skip the
+// handshake boilerplate.
+func connectFor(t *testing.T, ts *httptest.Server, token string) *websocket.Conn {
+	t.Helper()
+	conn := ctlDial(t, ts)
+	_ = readFrame(t, conn) // challenge
+	writeReq(t, conn, "c0", "connect", buildConnectParams(token))
+	res := readFrame(t, conn)
+	if res.OK == nil || !*res.OK {
+		t.Fatalf("connect failed: %+v", res.Error)
+	}
+	return conn
+}
+
+func TestControlWSAgentsListEmpty(t *testing.T) {
+	// Empty workspace: defaultId falls back to "main", mainKey is
+	// always "main" in the openclaw-go scoping model.
+	s := buildTestServer(t, "")
+	ts := httptest.NewServer(s.mux)
+	t.Cleanup(ts.Close)
+
+	conn := connectFor(t, ts, "")
+	writeReq(t, conn, "a1", "agents.list", map[string]any{})
+	f := readFrame(t, conn)
+	if f.OK == nil || !*f.OK {
+		t.Fatalf("agents.list failed: %+v", f.Error)
+	}
+	payload, ok := f.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map payload, got %T", f.Payload)
+	}
+	if payload["defaultId"] != "main" {
+		t.Errorf("expected defaultId=main on empty workspace, got %v", payload["defaultId"])
+	}
+	if payload["mainKey"] != "main" {
+		t.Errorf("expected mainKey=main, got %v", payload["mainKey"])
+	}
+	agentsField, ok := payload["agents"].([]any)
+	if !ok {
+		t.Fatalf("expected agents to be array, got %T", payload["agents"])
+	}
+	if len(agentsField) != 0 {
+		t.Errorf("expected empty agents list, got %d entries", len(agentsField))
+	}
+}
+
+func TestControlWSAgentsListWithAgents(t *testing.T) {
+	// Populated workspace: defaultId resolves to the first agent's id.
+	// Each agent record passes through with full AgentProfile fields
+	// (studio's shape only consumes id+name; extras are tolerated).
+	s := buildTestServer(t, "")
+	if err := s.workspace.Create(agentsImport("alpha", "Alpha agent")); err != nil {
+		t.Fatalf("create alpha: %v", err)
+	}
+	if err := s.workspace.Create(agentsImport("beta", "Beta agent")); err != nil {
+		t.Fatalf("create beta: %v", err)
+	}
+	ts := httptest.NewServer(s.mux)
+	t.Cleanup(ts.Close)
+
+	conn := connectFor(t, ts, "")
+	writeReq(t, conn, "a1", "agents.list", map[string]any{})
+	f := readFrame(t, conn)
+	if f.OK == nil || !*f.OK {
+		t.Fatalf("agents.list failed: %+v", f.Error)
+	}
+	payload, _ := f.Payload.(map[string]any)
+	agentsField, _ := payload["agents"].([]any)
+	if len(agentsField) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(agentsField))
+	}
+	first, _ := agentsField[0].(map[string]any)
+	if first["id"] != "alpha" && first["id"] != "beta" {
+		t.Errorf("unexpected first agent id: %v", first["id"])
+	}
+	// defaultId must equal one of the present agent ids.
+	defaultID, _ := payload["defaultId"].(string)
+	if defaultID != "alpha" && defaultID != "beta" {
+		t.Errorf("defaultId %q is not a present agent id", defaultID)
+	}
+}
+
+func TestControlWSMethodNotFoundShapeStable(t *testing.T) {
+	// A method explicitly absent from controlMethodHandlers must
+	// return METHOD_NOT_FOUND so a misconfigured client gets a
+	// debuggable error rather than a silent drop.
+	s := buildTestServer(t, "")
+	ts := httptest.NewServer(s.mux)
+	t.Cleanup(ts.Close)
+
+	conn := connectFor(t, ts, "")
+	writeReq(t, conn, "u1", "this.is.definitely.not.a.method", map[string]any{})
+	f := readFrame(t, conn)
+	if f.Error == nil || f.Error.Code != "METHOD_NOT_FOUND" {
+		t.Fatalf("expected METHOD_NOT_FOUND, got %+v", f.Error)
+	}
+	if !strings.Contains(f.Error.Message, "this.is.definitely.not.a.method") {
+		t.Errorf("error message should include method name; got %q", f.Error.Message)
 	}
 }
 

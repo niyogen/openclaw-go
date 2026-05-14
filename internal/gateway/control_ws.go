@@ -325,39 +325,108 @@ func (s *Server) handleControlConnect(frame controlFrame, signalConnected func()
 	})
 }
 
+// controlMethodHandler adapts an upstream openclaw method invocation to
+// whatever combination of our existing dispatchRPC handlers + response
+// shape adaptation it needs. It receives the request context (must be
+// honored for any I/O) and the raw params (delegate decoding to the
+// underlying dispatchRPC where possible). It returns the payload to
+// send back, or an rpcError for failures.
+//
+// Authors of new handlers should prefer composition: call into
+// s.dispatchRPC for an existing method when shapes are compatible, and
+// only re-implement when the upstream protocol's expected shape
+// differs from what openclaw-go's native RPC returns.
+type controlMethodHandler func(s *Server, ctx context.Context, params json.RawMessage) (any, *rpcError)
+
+// controlMethodHandlers is the dispatch table for upstream protocol
+// requests after the connect handshake. Keys are method names studio
+// (and other upstream-compatible clients) call. Adding a method here
+// makes it reachable via /control/ws. Methods not listed return
+// METHOD_NOT_FOUND.
+//
+// Phase 2 strategy: small adapters that call into dispatchRPC for the
+// real work, plus light response-shape adaptation where upstream
+// expects a different envelope. Methods that need substantial shape
+// changes (config.get/set, status with heartbeat data, sessions.preview)
+// are intentionally absent here — they'll land in Phase 3 with
+// dedicated handlers.
+var controlMethodHandlers = map[string]controlMethodHandler{
+	"wake":        handleWake,
+	"agents.list": handleAgentsList,
+}
+
 // dispatchControlMethod handles a request frame AFTER the connect
-// handshake. Phase 1: only `wake` is wired (it's a heartbeat-like
-// no-op studio fires to probe liveness). Every other method returns
-// METHOD_NOT_FOUND so missing-method behaviour is consistent and
-// debuggable. Phase 2+ will add real method handlers here.
+// handshake. Looks up the method in controlMethodHandlers; missing
+// methods get a structured METHOD_NOT_FOUND so studio's adapter can
+// surface the gap rather than hang on a missing response.
 //
 // ctx is the request context inherited from the HTTP request that
-// upgraded into this WebSocket. Phase 2 handlers that perform I/O
-// (HTTP, DB, file, channel dispatch) MUST honor ctx so client
-// disconnects propagate cancellation — otherwise a closed connection
-// leaves blocked goroutines hanging on long-running work. The wake
-// handler below is fully synchronous so it does not need ctx, but
-// the parameter is named (not `_`) so the obligation is visible to
-// every future contributor adding a case to this switch.
+// upgraded into this WebSocket. Handlers that perform I/O MUST honor
+// ctx so client disconnects propagate cancellation — otherwise a
+// closed connection leaves blocked goroutines hanging on long-running
+// work.
 func (s *Server) dispatchControlMethod(ctx context.Context, frame controlFrame, writeFrame func(controlFrame) error) {
-	_ = ctx // Phase 1: no handler uses ctx yet. Phase 2+ MUST.
-	switch frame.Method {
-	case "wake":
-		// Studio's lib/gateway/agentConfig.ts calls wake({}) as a
-		// heartbeat. Returning { ok: true, woke: true } satisfies its
-		// HeartbeatWakeResult type. RFC3339Nano matches the precision
-		// other openclaw-go endpoints use for time fields.
-		ok := true
-		_ = writeFrame(controlFrame{
-			Type:    "res",
-			ID:      frame.ID,
-			OK:      &ok,
-			Payload: map[string]any{"ok": true, "woke": true, "time": time.Now().UTC().Format(time.RFC3339Nano)},
-		})
-	default:
+	handler, ok := controlMethodHandlers[frame.Method]
+	if !ok {
 		_ = writeFrame(controlErrorResponse(frame.ID, "METHOD_NOT_FOUND",
 			"method not implemented on openclaw-go yet: "+frame.Method, nil))
+		return
 	}
+	payload, rpcErr := handler(s, ctx, frame.Params)
+	if rpcErr != nil {
+		_ = writeFrame(controlErrorResponse(frame.ID, "GATEWAY_ERROR", rpcErr.Message, nil))
+		return
+	}
+	okTrue := true
+	_ = writeFrame(controlFrame{
+		Type:    "res",
+		ID:      frame.ID,
+		OK:      &okTrue,
+		Payload: payload,
+	})
+}
+
+// handleWake is the heartbeat-like no-op studio fires to probe gateway
+// liveness. Studio's lib/gateway/agentConfig.ts decodes the response as
+// HeartbeatWakeResult so {ok, woke} are the load-bearing fields; we
+// also return time for human debugging. Params are ignored — studio
+// sometimes sends {mode: "now", text: "..."} to trigger an immediate
+// heartbeat, but openclaw-go doesn't currently distinguish modes.
+func handleWake(_ *Server, _ context.Context, _ json.RawMessage) (any, *rpcError) {
+	return map[string]any{
+		"ok":   true,
+		"woke": true,
+		"time": time.Now().UTC().Format(time.RFC3339Nano),
+	}, nil
+}
+
+// handleAgentsList adapts our workspace.List() result into the shape
+// studio's fleet hydration expects:
+//
+//	{ defaultId, mainKey, scope?, agents: [{id, name, identity?}, ...] }
+//
+// openclaw-go's native agents.list returns a flat `{agents: [...]}` of
+// AgentProfile records. Studio additionally needs a defaultId (used to
+// pick which agent is the "main" one on UI load) and a mainKey (used
+// to scope session lookups). We synthesize:
+//   - defaultId: the first agent's id, or "main" if no agents exist
+//   - mainKey: the literal string "main" (openclaw-go uses one
+//     namespace for sessions today; if/when we add session-scoping this
+//     becomes a real value)
+//
+// We pass the full AgentProfile through inside `agents[]`; studio's
+// shape only consumes id+name so extra fields are tolerated.
+func handleAgentsList(s *Server, _ context.Context, _ json.RawMessage) (any, *rpcError) {
+	list := s.workspace.List()
+	defaultID := "main"
+	if len(list) > 0 {
+		defaultID = list[0].ID
+	}
+	return map[string]any{
+		"defaultId": defaultID,
+		"mainKey":   "main",
+		"agents":    list,
+	}, nil
 }
 
 // verifyControlToken compares the supplied token against every auth
