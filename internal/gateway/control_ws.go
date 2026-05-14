@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -374,7 +375,8 @@ func (s *Server) dispatchControlMethod(ctx context.Context, frame controlFrame, 
 	}
 	payload, rpcErr := handler(s, ctx, frame.Params)
 	if rpcErr != nil {
-		_ = writeFrame(controlErrorResponse(frame.ID, "GATEWAY_ERROR", rpcErr.Message, nil))
+		code, msg := mapRPCErrorToControl(rpcErr)
+		_ = writeFrame(controlErrorResponse(frame.ID, code, msg, nil))
 		return
 	}
 	okTrue := true
@@ -386,13 +388,58 @@ func (s *Server) dispatchControlMethod(ctx context.Context, frame controlFrame, 
 	})
 }
 
+// mapRPCErrorToControl translates an internal rpcError (numeric
+// JSON-RPC style codes) into the string code studio's adapter reads.
+// Without this mapping, every adapter failure becomes a generic
+// GATEWAY_ERROR — studio can't differentiate a missing-resource error
+// from a malformed-params error from a transient backend failure, so
+// the UI can't render a sensible message.
+//
+// JSON-RPC reference codes:
+//
+//	-32700 parse error           → INVALID_REQUEST
+//	-32600 invalid request       → INVALID_REQUEST
+//	-32601 method not found      → METHOD_NOT_FOUND
+//	-32602 invalid params        → INVALID_REQUEST
+//	-32603 internal error        → INTERNAL_ERROR
+//	-32001 (our "not found" /
+//	        operation-failed)    → NOT_FOUND
+//	-32000 (our generic server)  → INTERNAL_ERROR
+//	other                        → GATEWAY_ERROR (preserves message)
+//
+// The string codes match the vocabulary upstream openclaw uses on its
+// own WS protocol (studio's gateway-connect-profile.ts switches on
+// codes like INVALID_REQUEST / GATEWAY_UNAVAILABLE). Where we don't
+// have a precise upstream analogue, GATEWAY_ERROR is the safe
+// catchall.
+func mapRPCErrorToControl(err *rpcError) (code, message string) {
+	if err == nil {
+		return "GATEWAY_ERROR", ""
+	}
+	switch err.Code {
+	case -32700, -32600, -32602:
+		return "INVALID_REQUEST", err.Message
+	case -32601:
+		return "METHOD_NOT_FOUND", err.Message
+	case -32603, -32000:
+		return "INTERNAL_ERROR", err.Message
+	case -32001:
+		return "NOT_FOUND", err.Message
+	default:
+		return "GATEWAY_ERROR", err.Message
+	}
+}
+
 // handleWake is the heartbeat-like no-op studio fires to probe gateway
 // liveness. Studio's lib/gateway/agentConfig.ts decodes the response as
 // HeartbeatWakeResult so {ok, woke} are the load-bearing fields; we
 // also return time for human debugging. Params are ignored — studio
 // sometimes sends {mode: "now", text: "..."} to trigger an immediate
 // heartbeat, but openclaw-go doesn't currently distinguish modes.
-func handleWake(_ *Server, _ context.Context, _ json.RawMessage) (any, *rpcError) {
+func handleWake(_ *Server, ctx context.Context, _ json.RawMessage) (any, *rpcError) {
+	// ctx unused: handler is synchronous. Named for the framework
+	// contract — Phase 2+ handlers that perform I/O must honor it.
+	_ = ctx
 	return map[string]any{
 		"ok":   true,
 		"woke": true,
@@ -409,15 +456,32 @@ func handleWake(_ *Server, _ context.Context, _ json.RawMessage) (any, *rpcError
 // AgentProfile records. Studio additionally needs a defaultId (used to
 // pick which agent is the "main" one on UI load) and a mainKey (used
 // to scope session lookups). We synthesize:
-//   - defaultId: the first agent's id, or "main" if no agents exist
-//   - mainKey: the literal string "main" (openclaw-go uses one
-//     namespace for sessions today; if/when we add session-scoping this
-//     becomes a real value)
+//
+//   - Agents sorted by CreatedAt (oldest first), then ID as tiebreaker
+//     — Workspace.List() iterates a map so its native order is
+//     non-deterministic; sorting here guarantees a stable response on
+//     every call. Studio relies on defaultId being stable across
+//     bootstraps, so this matters for correctness, not just polish.
+//   - defaultId: the first (oldest) agent's id, or "main" if no agents
+//     exist. "main" is the conventional name openclaw uses for the
+//     primary agent in single-agent setups.
+//   - mainKey: the literal string "main". openclaw-go uses one
+//     namespace for sessions today; if/when we add session-scoping
+//     this becomes a real value.
 //
 // We pass the full AgentProfile through inside `agents[]`; studio's
 // shape only consumes id+name so extra fields are tolerated.
-func handleAgentsList(s *Server, _ context.Context, _ json.RawMessage) (any, *rpcError) {
+func handleAgentsList(s *Server, ctx context.Context, _ json.RawMessage) (any, *rpcError) {
+	// ctx unused: List() is in-memory + mutex-protected, can't block.
+	// Named for the framework contract.
+	_ = ctx
 	list := s.workspace.List()
+	sort.Slice(list, func(i, j int) bool {
+		if !list[i].CreatedAt.Equal(list[j].CreatedAt) {
+			return list[i].CreatedAt.Before(list[j].CreatedAt)
+		}
+		return list[i].ID < list[j].ID
+	})
 	defaultID := "main"
 	if len(list) > 0 {
 		defaultID = list[0].ID

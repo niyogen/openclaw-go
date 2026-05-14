@@ -16,9 +16,12 @@ import (
 	"openclaw-go/internal/agents"
 )
 
-// agentsImport is a tiny constructor for AgentProfile in tests. Kept
-// local so test files don't have to repeat the field-name plumbing.
-func agentsImport(id, name string) agents.AgentProfile {
+// newTestAgent is a tiny constructor for AgentProfile in tests. Note
+// that Workspace.Create overrides CreatedAt with time.Now() on every
+// insertion — so call order in the test determines CreatedAt order,
+// which handleAgentsList sorts by. Lexicographic ID tiebreaker
+// guarantees deterministic order even on same-nanosecond ties.
+func newTestAgent(id, name string) agents.AgentProfile {
 	return agents.AgentProfile{ID: id, Name: name}
 }
 
@@ -461,38 +464,98 @@ func TestControlWSAgentsListEmpty(t *testing.T) {
 }
 
 func TestControlWSAgentsListWithAgents(t *testing.T) {
-	// Populated workspace: defaultId resolves to the first agent's id.
-	// Each agent record passes through with full AgentProfile fields
-	// (studio's shape only consumes id+name; extras are tolerated).
+	// Populated workspace: ordering is sorted-by-CreatedAt-asc with
+	// ID as the tiebreaker, so the FIRST-created agent (alpha here)
+	// is always first in the response and is the defaultId. This
+	// pins what was previously a non-deterministic map-iteration
+	// behavior.
 	s := buildTestServer(t, "")
-	if err := s.workspace.Create(agentsImport("alpha", "Alpha agent")); err != nil {
+	if err := s.workspace.Create(newTestAgent("alpha", "Alpha agent")); err != nil {
 		t.Fatalf("create alpha: %v", err)
 	}
-	if err := s.workspace.Create(agentsImport("beta", "Beta agent")); err != nil {
+	if err := s.workspace.Create(newTestAgent("beta", "Beta agent")); err != nil {
 		t.Fatalf("create beta: %v", err)
 	}
 	ts := httptest.NewServer(s.mux)
 	t.Cleanup(ts.Close)
 
+	// Hit the endpoint twice and require identical responses — the
+	// regression test for the bug where map-iteration returned
+	// different orderings on successive calls.
 	conn := connectFor(t, ts, "")
-	writeReq(t, conn, "a1", "agents.list", map[string]any{})
-	f := readFrame(t, conn)
-	if f.OK == nil || !*f.OK {
-		t.Fatalf("agents.list failed: %+v", f.Error)
+	captureAgentsList := func(t *testing.T, id string) (string, []string) {
+		t.Helper()
+		writeReq(t, conn, id, "agents.list", map[string]any{})
+		f := readFrame(t, conn)
+		if f.OK == nil || !*f.OK {
+			t.Fatalf("agents.list failed: %+v", f.Error)
+		}
+		payload, _ := f.Payload.(map[string]any)
+		defaultID, _ := payload["defaultId"].(string)
+		agentsField, _ := payload["agents"].([]any)
+		ids := make([]string, 0, len(agentsField))
+		for _, a := range agentsField {
+			m, _ := a.(map[string]any)
+			id, _ := m["id"].(string)
+			ids = append(ids, id)
+		}
+		return defaultID, ids
 	}
-	payload, _ := f.Payload.(map[string]any)
-	agentsField, _ := payload["agents"].([]any)
-	if len(agentsField) != 2 {
-		t.Fatalf("expected 2 agents, got %d", len(agentsField))
+
+	defaultID1, ids1 := captureAgentsList(t, "a1")
+	defaultID2, ids2 := captureAgentsList(t, "a2")
+
+	// alpha was created first → alpha is the default and appears first.
+	if defaultID1 != "alpha" {
+		t.Errorf("expected defaultId=alpha (oldest), got %q", defaultID1)
 	}
-	first, _ := agentsField[0].(map[string]any)
-	if first["id"] != "alpha" && first["id"] != "beta" {
-		t.Errorf("unexpected first agent id: %v", first["id"])
+	if len(ids1) != 2 || ids1[0] != "alpha" || ids1[1] != "beta" {
+		t.Errorf("expected [alpha, beta] ordering, got %v", ids1)
 	}
-	// defaultId must equal one of the present agent ids.
-	defaultID, _ := payload["defaultId"].(string)
-	if defaultID != "alpha" && defaultID != "beta" {
-		t.Errorf("defaultId %q is not a present agent id", defaultID)
+	// Stability across successive calls.
+	if defaultID1 != defaultID2 {
+		t.Errorf("defaultId not stable: %q vs %q", defaultID1, defaultID2)
+	}
+	if len(ids1) != len(ids2) {
+		t.Errorf("agent count not stable")
+	} else {
+		for i := range ids1 {
+			if ids1[i] != ids2[i] {
+				t.Errorf("agents[%d] not stable: %q vs %q", i, ids1[i], ids2[i])
+			}
+		}
+	}
+}
+
+func TestMapRPCErrorToControl(t *testing.T) {
+	// Verify each rpcError.Code maps to the expected upstream string
+	// code. Studio's adapter routes UI behavior on the string code, so
+	// each mapping is load-bearing for error UX.
+	cases := []struct {
+		name string
+		in   *rpcError
+		code string
+	}{
+		{"nil error", nil, "GATEWAY_ERROR"},
+		{"parse error", &rpcError{Code: -32700, Message: "parse"}, "INVALID_REQUEST"},
+		{"invalid request", &rpcError{Code: -32600, Message: "bad"}, "INVALID_REQUEST"},
+		{"invalid params", &rpcError{Code: -32602, Message: "bad params"}, "INVALID_REQUEST"},
+		{"method not found", &rpcError{Code: -32601, Message: "no method"}, "METHOD_NOT_FOUND"},
+		{"internal error -32603", &rpcError{Code: -32603, Message: "boom"}, "INTERNAL_ERROR"},
+		{"server error -32000", &rpcError{Code: -32000, Message: "fail"}, "INTERNAL_ERROR"},
+		{"not found -32001", &rpcError{Code: -32001, Message: "agent missing"}, "NOT_FOUND"},
+		{"unknown code", &rpcError{Code: 999, Message: "?"}, "GATEWAY_ERROR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, msg := mapRPCErrorToControl(tc.in)
+			if got != tc.code {
+				t.Errorf("code: got %q, want %q", got, tc.code)
+			}
+			if tc.in != nil && msg != tc.in.Message {
+				t.Errorf("message not preserved: got %q, want %q", msg, tc.in.Message)
+			}
+		})
 	}
 }
 
