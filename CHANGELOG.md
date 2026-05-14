@@ -10,16 +10,41 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 ### Added
 
 - **Upstream-compatible WebSocket endpoint** at `/control/ws`
-  (`internal/gateway/control_ws.go`). Speaks the upstream openclaw
-  protocol shape (`connect.challenge` → `req method=connect` → `res
-  ok=true`, then `{type:"req"|"res"|"event", id, method, params,
-  payload, ok, error}` framing) so frontends written against upstream
-  openclaw — openclaw-studio, openclaw-nerve, native apps — can
-  connect to openclaw-go unmodified. Phase 1 of the
-  upstream-protocol-compat work: connect handshake + `wake` heartbeat
-  wired; every other method returns `METHOD_NOT_FOUND` until later
-  phases register handlers. Grants all 5 operator scopes
-  unconditionally (scope-enforced authz is a separate parity item).
+  (`internal/gateway/control_ws.go` + `control_methods.go`). Speaks
+  the upstream openclaw protocol shape (`connect.challenge` → `req
+  method=connect` → `res ok=true`, then `{type:"req"|"res"|"event",
+  id, method, params, payload, ok, error}` framing) so frontends
+  written against upstream openclaw — openclaw-studio, openclaw-
+  nerve, native apps — can connect to openclaw-go unmodified.
+
+  Connect handshake validates protocol version (v3 only today),
+  optimistic-concurrency operator-token via constant-time compare,
+  and grants all 5 operator scopes (scope-enforced authz is a
+  separate parity item). 5s handshake timeout closes unauthed
+  sockets so they can't camp. Per-connection request goroutines
+  bounded at 32 in-flight for studio's parallel bootstrap fan-out.
+
+  Method adapters wired (Phase 2): wake, status, agents.{list,
+  create, update, delete, files.get, files.set}, sessions.{list,
+  preview, reset, patch}, cron.{list, add, run, remove (alias to
+  cron.delete)}, config.{get, set, patch} (with sha256
+  optimistic-concurrency), models.list, chat.{send, history,
+  abort} (with sessionKey→sessionId rename), agent.wait,
+  exec.approvals.{get, set} (stubs), exec.approval.resolve.
+
+  Server-pushed events: each connected client subscribes to the
+  gateway's internal event bus; SessionMessage and AgentReply
+  events surface as upstream `presence` events (which studio
+  classifies as summary-refresh, triggering preview/history
+  refetch). Lifecycle-correct chat events (agent.run.started →
+  chat delta(s) → chat final) is a follow-up Phase 4 item.
+
+  Validation: openclaw-studio drives openclaw-go end-to-end via
+  the new endpoint — UI loads with Connected indicator, agent
+  fleet populates, config snapshot loads, chat round-trip echoes
+  back. Validated via 4-test Playwright suite at
+  `openclaw-go-studio/tests/integ/openclaw-go.spec.ts`.
+
   Coexists with the existing `/ws` endpoint; existing clients
   unaffected.
 - **Reference example plugins**: `plugins/example-tool/` and
