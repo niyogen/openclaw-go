@@ -475,6 +475,10 @@ func handleAgentsList(s *Server, ctx context.Context, _ json.RawMessage) (any, *
 	// ctx unused: List() is in-memory + mutex-protected, can't block.
 	// Named for the framework contract.
 	_ = ctx
+	// Workspace.List() currently returns a fresh slice on every call,
+	// so the in-place sort below is safe. If that ever changes to
+	// return a shared / cached slice, copy here first to avoid
+	// corrupting workspace state.
 	list := s.workspace.List()
 	sort.Slice(list, func(i, j int) bool {
 		if !list[i].CreatedAt.Equal(list[j].CreatedAt) {

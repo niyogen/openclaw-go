@@ -468,11 +468,17 @@ func TestControlWSAgentsListWithAgents(t *testing.T) {
 	// ID as the tiebreaker, so the FIRST-created agent (alpha here)
 	// is always first in the response and is the defaultId. This
 	// pins what was previously a non-deterministic map-iteration
-	// behavior.
+	// behavior. The time.Sleep guarantees the two Create calls land
+	// on different CreatedAt values even on coarse-resolution clocks;
+	// without it, alpha < beta lexicographic happens to align with
+	// chronological order, so the test would pass for the wrong reason.
+	// (See TestControlWSAgentsListSortsByCreationOrder for the
+	// isolated chronological-vs-lexicographic regression test.)
 	s := buildTestServer(t, "")
 	if err := s.workspace.Create(newTestAgent("alpha", "Alpha agent")); err != nil {
 		t.Fatalf("create alpha: %v", err)
 	}
+	time.Sleep(2 * time.Millisecond)
 	if err := s.workspace.Create(newTestAgent("beta", "Beta agent")); err != nil {
 		t.Fatalf("create beta: %v", err)
 	}
@@ -524,6 +530,50 @@ func TestControlWSAgentsListWithAgents(t *testing.T) {
 				t.Errorf("agents[%d] not stable: %q vs %q", i, ids1[i], ids2[i])
 			}
 		}
+	}
+}
+
+func TestControlWSAgentsListSortsByCreationOrder(t *testing.T) {
+	// Regression test for the determinism fix: create agents in REVERSE
+	// alphabetical order with a real time gap between them. If the
+	// handler sorted by ID instead of CreatedAt, the response would be
+	// [alpha, zeta] with defaultId=alpha. With CreatedAt-asc sort,
+	// the response is [zeta, alpha] with defaultId=zeta — matching the
+	// claim in the godoc that "oldest agent is the default" rather than
+	// "alphabetically first agent is the default." This isolates the
+	// chronological-vs-lexicographic path that the alpha/beta test
+	// can't distinguish.
+	s := buildTestServer(t, "")
+	if err := s.workspace.Create(newTestAgent("zeta", "Zeta agent (created first)")); err != nil {
+		t.Fatalf("create zeta: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := s.workspace.Create(newTestAgent("alpha", "Alpha agent (created second)")); err != nil {
+		t.Fatalf("create alpha: %v", err)
+	}
+	ts := httptest.NewServer(s.mux)
+	t.Cleanup(ts.Close)
+
+	conn := connectFor(t, ts, "")
+	writeReq(t, conn, "a1", "agents.list", map[string]any{})
+	f := readFrame(t, conn)
+	if f.OK == nil || !*f.OK {
+		t.Fatalf("agents.list failed: %+v", f.Error)
+	}
+	payload, _ := f.Payload.(map[string]any)
+	defaultID, _ := payload["defaultId"].(string)
+	if defaultID != "zeta" {
+		t.Errorf("expected defaultId=zeta (chronologically first), got %q — "+
+			"handler may be sorting by ID instead of CreatedAt", defaultID)
+	}
+	agentsField, _ := payload["agents"].([]any)
+	if len(agentsField) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(agentsField))
+	}
+	first, _ := agentsField[0].(map[string]any)
+	second, _ := agentsField[1].(map[string]any)
+	if first["id"] != "zeta" || second["id"] != "alpha" {
+		t.Errorf("expected [zeta, alpha], got [%v, %v]", first["id"], second["id"])
 	}
 }
 
