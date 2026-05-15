@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -628,6 +629,54 @@ func TestControlWSMethodNotFoundShapeStable(t *testing.T) {
 	if !strings.Contains(f.Error.Message, "this.is.definitely.not.a.method") {
 		t.Errorf("error message should include method name; got %q", f.Error.Message)
 	}
+}
+
+func TestControlWSFanoutGoroutineExitsOnDisconnect(t *testing.T) {
+	// Regression test for the leak: fanoutControlEvents was started
+	// with r.Context() as its cancel signal, but hijacked WS conns
+	// detach from the http server's request context — r.Context()
+	// is not cancelled when the handler returns. Fixed via an
+	// explicit handlerDone channel.
+	//
+	// This test verifies the fix indirectly by counting goroutines
+	// before and after a series of connect+disconnect cycles. If
+	// the leak is back, count grows linearly with cycles.
+	s := buildTestServer(t, "")
+	ts := httptest.NewServer(s.mux)
+	t.Cleanup(ts.Close)
+
+	// Settle.
+	time.Sleep(50 * time.Millisecond)
+	base := goroutineCount()
+
+	const cycles = 20
+	for i := range cycles {
+		conn := ctlDial(t, ts)
+		_ = readFrame(t, conn) // challenge
+		writeReq(t, conn, fmt.Sprintf("c%d", i), "connect", buildConnectParams(""))
+		_ = readFrame(t, conn) // connect res — triggers fanout spawn
+		_ = conn.Close()
+	}
+	// Allow goroutines to wind down.
+	time.Sleep(300 * time.Millisecond)
+	after := goroutineCount()
+	delta := after - base
+
+	// Some noise is expected (test infra, http server pool). With
+	// the leak the count grows by ~cycles (one per disconnected
+	// session). With the fix it should stay within single digits.
+	if delta > cycles/2 {
+		t.Errorf("suspected goroutine leak: %d cycles, baseline %d, after %d (delta %d)",
+			cycles, base, after, delta)
+	}
+}
+
+// goroutineCount returns the current number of running goroutines.
+// Use only as a smoke-level leak detector — counts include test
+// infrastructure goroutines so the absolute number is noisy; the
+// useful signal is the *delta* across an operation.
+func goroutineCount() int {
+	return runtime.NumGoroutine()
 }
 
 func TestControlWSAllowsNoOriginHeader(t *testing.T) {
