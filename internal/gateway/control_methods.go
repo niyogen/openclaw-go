@@ -876,25 +876,27 @@ func (s *Server) fanoutControlEvents(done <-chan struct{}, seq *int64, writeFram
 
 // translateGatewayEvent converts an internal GatewayEvent into the
 // upstream-shape (eventName, payload) pair studio's adapter expects.
-// Returns ("", nil) when the event has no upstream analogue or is
-// missing required fields — caller drops it.
+// Returns ("", nil) when the event has no upstream analogue.
 //
-// Studio's runtime-chat workflow is run-state-machine driven
-// (agent.run.started → chat delta(s) → chat final), and openclaw-go
-// doesn't yet emit those lifecycle markers. Until the run-tracking
-// support lands (Phase 4 of the upstream-protocol work), we fall back
-// to firing `presence` events on every session change. Studio
-// classifies `presence` as "summary-refresh" — which triggers a fresh
-// preview/history fetch — so the UI picks up new chat content even
-// without correct run-id correlation.
+// We emit `presence` events for session-affecting changes. Studio
+// classifies presence as "summary-refresh" — triggers a fresh
+// preview/history fetch — so the UI eventually picks up new chat
+// content after a few-second polling cycle.
 //
-// This is a working approximation; the right long-term answer is a
-// proper run tracker. See PARITY.md.
+// Why not `chat` events directly: studio's runtime-chat workflow
+// fires its UI update path only when the event's runId matches an
+// `activeRunId` it's already tracking (via an `agent.run.started`
+// lifecycle event). openclaw-go doesn't yet emit a run lifecycle
+// because we don't model "runs" as first-class entities. Emitting
+// orphan `chat` events would land in projection-store but wouldn't
+// flow to the chat panel.
+//
+// A real run tracker is filed as the primary v0.5.x follow-up.
+// Until then, presence-based summary-refresh is the stable answer
+// (verified working with page reload as a forcing function).
 func translateGatewayEvent(ev GatewayEvent) (string, any) {
 	switch ev.Type {
 	case EventSessionMessage:
-		// Trigger studio's summary-refresh path. Payload carries the
-		// session key so studio can prioritize the right agent.
 		return "presence", map[string]any{
 			"sessionKey": ev.SessionID,
 			"at":         time.Now().UTC().Format(time.RFC3339Nano),

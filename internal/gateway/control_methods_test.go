@@ -706,11 +706,22 @@ func TestTranslateGatewayEventSessionMessageBecomesPresence(t *testing.T) {
 	}
 	name, payload := translateGatewayEvent(ev)
 	if name != "presence" {
-		t.Errorf("expected presence event name, got %q", name)
+		t.Errorf("expected presence event (run-tracker work pending), got %q", name)
 	}
 	p, _ := payload.(map[string]any)
 	if p["sessionKey"] != "agent:main:main" {
 		t.Errorf("sessionKey mismatch: %v", p["sessionKey"])
+	}
+}
+
+func TestTranslateGatewayEventAgentReplyEmitsPresence(t *testing.T) {
+	// EventAgentReply also surfaces as presence (summary-refresh
+	// trigger). When the run-tracker lands and we differentiate
+	// these, this test will need a richer assertion.
+	ev := GatewayEvent{Type: EventAgentReply, SessionID: "x"}
+	name, _ := translateGatewayEvent(ev)
+	if name != "presence" {
+		t.Errorf("expected presence for EventAgentReply, got %q", name)
 	}
 }
 
