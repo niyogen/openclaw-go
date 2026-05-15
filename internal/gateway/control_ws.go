@@ -218,15 +218,24 @@ func (s *Server) handleControlWS(w http.ResponseWriter, r *http.Request) {
 		if err := conn.ReadJSON(&frame); err != nil {
 			return
 		}
-		s.handleControlFrame(r.Context(), frame, &connected, signalConnected, writeFrame, sem)
+		s.handleControlFrame(r.Context(), handlerDone, frame, &connected, signalConnected, writeFrame, sem)
 	}
 }
 
 // handleControlFrame routes one inbound frame. The connect path is
 // inline (must complete before other methods can run). Post-connect
 // method requests are dispatched in goroutines, throttled by sem.
+//
+// done is the per-connection lifetime signal — closed when the WS
+// handler exits. We watch it in the semaphore-acquire select for
+// the same reason fanoutControlEvents does: hijacked WS conns
+// detach from r.Context(), so ctx.Done() may not fire on client
+// disconnect. Without `done`, a client that fills the in-flight
+// semaphore (32 concurrent) and then disconnects could leave the
+// reader waiting on a free slot even though no work is left to do.
 func (s *Server) handleControlFrame(
 	ctx context.Context,
+	done <-chan struct{},
 	frame controlFrame,
 	connected *atomic.Bool,
 	signalConnected func(),
@@ -275,10 +284,15 @@ func (s *Server) handleControlFrame(
 
 	// Throttle: block briefly if the per-connection in-flight cap is
 	// hit. Studio's bootstrap fires ~6 in parallel so this normally
-	// admits immediately.
+	// admits immediately. We watch BOTH ctx.Done (request context)
+	// AND the per-connection done channel so a disconnected client
+	// doesn't block the reader (ctx.Done may not fire for hijacked
+	// WS conns — see handleControlWS doc block).
 	select {
 	case sem <- struct{}{}:
 	case <-ctx.Done():
+		return
+	case <-done:
 		return
 	}
 	go func() {
