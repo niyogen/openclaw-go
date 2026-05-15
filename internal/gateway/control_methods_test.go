@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -422,6 +423,277 @@ func writeAssistantMessage(s *Server, sessID, content string) error {
 		Content:   content,
 		CreatedAt: time.Now().UTC(),
 	})
+}
+
+// ── Additional capability tests (round 2: matrix coverage) ────────
+
+func TestControlWSCronAddListRunRemove(t *testing.T) {
+	// Cron CRUD round-trip: add → list (should appear) → run
+	// (must not error for known id) → remove (must clean up).
+	call, _ := newCtlForMethod(t)
+	// Add.
+	addRes := call("c1", "cron.add", map[string]any{
+		"id":       "test-job",
+		"name":     "Test job",
+		"schedule": "@every 1h",
+		"command":  "echo hi",
+		"enabled":  true,
+	})
+	if addRes.OK == nil || !*addRes.OK {
+		t.Fatalf("cron.add failed: %+v", addRes.Error)
+	}
+
+	// List.
+	listRes := call("c2", "cron.list", map[string]any{})
+	if listRes.OK == nil || !*listRes.OK {
+		t.Fatalf("cron.list failed: %+v", listRes.Error)
+	}
+	jobs, _ := listRes.Payload.(map[string]any)["jobs"].([]any)
+	found := false
+	for _, j := range jobs {
+		m, _ := j.(map[string]any)
+		if m["id"] == "test-job" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("cron.list did not include the just-added job; got %+v", jobs)
+	}
+
+	// Run.
+	runRes := call("c3", "cron.run", map[string]any{"id": "test-job"})
+	if runRes.OK == nil || !*runRes.OK {
+		t.Fatalf("cron.run failed: %+v", runRes.Error)
+	}
+
+	// Remove (alias for cron.delete).
+	rmRes := call("c4", "cron.remove", map[string]any{"id": "test-job"})
+	if rmRes.OK == nil || !*rmRes.OK {
+		t.Fatalf("cron.remove failed: %+v", rmRes.Error)
+	}
+}
+
+func TestControlWSModelsList(t *testing.T) {
+	// Studio's model picker fetches this. Returns must have a
+	// `models` field containing an array (possibly empty).
+	call, _ := newCtlForMethod(t)
+	f := call("m1", "models.list", map[string]any{})
+	if f.OK == nil || !*f.OK {
+		t.Fatalf("models.list failed: %+v", f.Error)
+	}
+	p, _ := f.Payload.(map[string]any)
+	if _, ok := p["models"]; !ok {
+		t.Errorf("expected models key in payload; got %+v", p)
+	}
+}
+
+func TestControlWSChatAbortRenamesSessionKey(t *testing.T) {
+	// Studio sends sessionKey; native chat.abort expects sessionId.
+	// Even with a non-existent session the rename should occur and
+	// we should get a structured response (not a method-not-found).
+	call, _ := newCtlForMethod(t)
+	f := call("ca1", "chat.abort", map[string]any{"sessionKey": "agent:main:main"})
+	// Native chat.abort uses store.Abort which currently no-ops for
+	// missing sessions and returns ok=true. The important assertion
+	// is that we DID translate the param — verified by not getting
+	// a "sessionId is required" error from the native handler.
+	if f.Error != nil && strings.Contains(f.Error.Message, "sessionId") {
+		t.Errorf("sessionKey was not translated to sessionId: %+v", f.Error)
+	}
+}
+
+func TestControlWSChatAbortRequiresSessionKey(t *testing.T) {
+	call, _ := newCtlForMethod(t)
+	f := call("ca2", "chat.abort", map[string]any{})
+	if f.OK == nil || *f.OK {
+		t.Fatalf("chat.abort without sessionKey must fail, got %+v", f)
+	}
+}
+
+func TestControlWSConfigSetWritesDisk(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "openclaw.json")
+	t.Setenv("OPENCLAW_CONFIG_PATH", cfgPath)
+
+	call, _ := newCtlForMethod(t)
+	f := call("s1", "config.set", map[string]any{"raw": `{"version":42}`})
+	if f.OK == nil || !*f.OK {
+		t.Fatalf("config.set failed: %+v", f.Error)
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(raw) != `{"version":42}` {
+		t.Errorf("disk content wrong: %q", string(raw))
+	}
+	// Returns hash + path so callers can chain.
+	p, _ := f.Payload.(map[string]any)
+	if p["hash"] == "" {
+		t.Errorf("expected hash in response, got %+v", p)
+	}
+	if p["path"] != cfgPath {
+		t.Errorf("expected path=%q, got %v", cfgPath, p["path"])
+	}
+}
+
+func TestControlWSConfigSetRequiresRaw(t *testing.T) {
+	call, _ := newCtlForMethod(t)
+	f := call("s1", "config.set", map[string]any{})
+	if f.OK == nil || *f.OK {
+		t.Fatalf("config.set with empty raw must fail, got %+v", f)
+	}
+}
+
+func TestControlWSAgentsFilesSetThenGetRoundTrip(t *testing.T) {
+	// Write a file via agents.files.set, retrieve via agents.files.get.
+	// Round-trip proves the upstream-shape inputs/outputs line up.
+	call, _ := newCtlForMethod(t)
+	// Seed agent (agents.files.set assigns the artifact to an
+	// agentId but doesn't require the agent to exist; still it's
+	// closer to studio's actual flow).
+	_ = call("seed", "agents.create", map[string]any{"agentId": "filer", "name": "Filer"})
+
+	setRes := call("fs1", "agents.files.set", map[string]any{
+		"agentId": "filer",
+		"path":    "notes/idea.md",
+		"content": "this is the content",
+		"type":    "text",
+	})
+	if setRes.OK == nil || !*setRes.OK {
+		t.Fatalf("agents.files.set failed: %+v", setRes.Error)
+	}
+
+	getRes := call("fg1", "agents.files.get", map[string]any{
+		"agentId": "filer",
+		"path":    "notes/idea.md",
+	})
+	if getRes.OK == nil || !*getRes.OK {
+		t.Fatalf("agents.files.get failed: %+v", getRes.Error)
+	}
+	p, _ := getRes.Payload.(map[string]any)
+	if p["content"] != "this is the content" {
+		t.Errorf("content round-trip mismatch: got %v", p["content"])
+	}
+	if p["path"] != "notes/idea.md" {
+		t.Errorf("path round-trip mismatch: got %v", p["path"])
+	}
+}
+
+func TestControlWSAgentsFilesGetRequiresAgentId(t *testing.T) {
+	call, _ := newCtlForMethod(t)
+	f := call("fg1", "agents.files.get", map[string]any{"path": "foo"})
+	if f.OK == nil || *f.OK {
+		t.Fatalf("agents.files.get without agentId must fail, got %+v", f)
+	}
+}
+
+func TestControlWSAgentsFilesSetRequiresPath(t *testing.T) {
+	call, _ := newCtlForMethod(t)
+	f := call("fs1", "agents.files.set", map[string]any{
+		"agentId": "filer",
+		"content": "x",
+	})
+	if f.OK == nil || *f.OK {
+		t.Fatalf("agents.files.set without path must fail, got %+v", f)
+	}
+}
+
+func TestControlWSSessionsResetClearsMessages(t *testing.T) {
+	call, s := newCtlForMethod(t)
+	if err := s.store.UpsertSession("reset-session", "chat", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAssistantMessage(s, "reset-session", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAssistantMessage(s, "reset-session", "second"); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.store.History("reset-session")
+	if len(before) != 2 {
+		t.Fatalf("expected 2 messages pre-reset, got %d", len(before))
+	}
+
+	f := call("r1", "sessions.reset", map[string]any{"key": "reset-session"})
+	if f.OK == nil || !*f.OK {
+		t.Fatalf("sessions.reset failed: %+v", f.Error)
+	}
+
+	after, ok := s.store.History("reset-session")
+	if !ok {
+		t.Fatalf("session should still exist after reset (just cleared)")
+	}
+	if len(after) != 0 {
+		t.Errorf("expected 0 messages post-reset, got %d", len(after))
+	}
+}
+
+func TestControlWSSessionsResetMissingKeyError(t *testing.T) {
+	call, _ := newCtlForMethod(t)
+	f := call("r1", "sessions.reset", map[string]any{"key": "does-not-exist"})
+	if f.OK == nil || *f.OK {
+		t.Fatalf("sessions.reset on missing key must fail, got %+v", f)
+	}
+}
+
+func TestControlWSSessionsListDeterministicOrder(t *testing.T) {
+	// Verify the UpdatedAt-DESC sort behaviour (regression test for
+	// the non-determinism fix).
+	call, s := newCtlForMethod(t)
+	// Insert in order: older, newer. Verify list returns newer first.
+	if err := s.store.UpsertSession("older-session", "chat", ""); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := s.store.UpsertSession("newer-session", "chat", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	for try := range 3 {
+		f := call(fmt.Sprintf("l%d", try), "sessions.list", map[string]any{})
+		if f.OK == nil || !*f.OK {
+			t.Fatalf("sessions.list failed: %+v", f.Error)
+		}
+		sessionsArr, _ := f.Payload.(map[string]any)["sessions"].([]any)
+		if len(sessionsArr) < 2 {
+			t.Fatalf("expected ≥2 sessions, got %d", len(sessionsArr))
+		}
+		first, _ := sessionsArr[0].(map[string]any)
+		if first["key"] != "newer-session" {
+			t.Errorf("expected newer-session first on try %d, got %v", try, first["key"])
+		}
+	}
+}
+
+func TestControlWSExecApprovalResolveAlias(t *testing.T) {
+	// exec.approval.resolve wraps approvals.decide. Without any
+	// pending approval, native handler returns NOT_FOUND — proves
+	// the alias dispatched to the right method (not METHOD_NOT_FOUND).
+	call, _ := newCtlForMethod(t)
+	f := call("e1", "exec.approval.resolve", map[string]any{
+		"id":       "non-existent",
+		"decision": "approve",
+		"approved": true,
+	})
+	if f.Error != nil && f.Error.Code == "METHOD_NOT_FOUND" {
+		t.Errorf("exec.approval.resolve should alias to approvals.decide, not METHOD_NOT_FOUND")
+	}
+}
+
+func TestControlWSAgentWaitWithoutWaitFails(t *testing.T) {
+	// agent.wait native handler expects a sessionId/agentId. We
+	// pass through, so an empty params call should fail validation
+	// (proves the method is routed, not silently dropped).
+	call, _ := newCtlForMethod(t)
+	f := call("aw1", "agent.wait", map[string]any{})
+	// We don't assert specific failure — just that it ROUTED somewhere
+	// (could be invalid-params or some other gateway error). The
+	// negative assertion is "not METHOD_NOT_FOUND".
+	if f.Error != nil && f.Error.Code == "METHOD_NOT_FOUND" {
+		t.Errorf("agent.wait should be implemented, not METHOD_NOT_FOUND")
+	}
 }
 
 // ── translateGatewayEvent direct tests ─────────────────────────────
