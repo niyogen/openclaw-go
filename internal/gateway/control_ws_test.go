@@ -631,6 +631,44 @@ func TestControlWSMethodNotFoundShapeStable(t *testing.T) {
 	}
 }
 
+func TestControlWSHandshakeTimerExitsOnPreConnectDisconnect(t *testing.T) {
+	// Variant of the leak class: a client that connects to /control/ws
+	// and disconnects BEFORE completing the handshake. Without the
+	// handlerDone watch in the handshake-timeout select, that
+	// goroutine would wait up to controlConnectTimeout (5s) for
+	// time.After to fire before exiting — 5s of lingering goroutine
+	// per disconnect under high churn.
+	//
+	// With the fix, the timer goroutine exits within a few ms of
+	// the handler returning. We can detect this by measuring
+	// goroutine count delta over many cycles — without the fix,
+	// cycles that finish within 5s would each leave a live timer
+	// goroutine in the count.
+	s := buildTestServer(t, "")
+	ts := httptest.NewServer(s.mux)
+	t.Cleanup(ts.Close)
+
+	time.Sleep(50 * time.Millisecond)
+	base := goroutineCount()
+
+	const cycles = 15
+	for range cycles {
+		conn := ctlDial(t, ts)
+		_ = readFrame(t, conn) // challenge
+		// Disconnect WITHOUT sending the connect req.
+		_ = conn.Close()
+	}
+	// Generous settle time; nowhere near the 5s timeout.
+	time.Sleep(300 * time.Millisecond)
+	after := goroutineCount()
+	delta := after - base
+
+	if delta > cycles/2 {
+		t.Errorf("handshake-timer goroutine appears to leak on pre-connect disconnect: %d cycles, baseline %d, after %d (delta %d)",
+			cycles, base, after, delta)
+	}
+}
+
 func TestControlWSFanoutGoroutineExitsOnDisconnect(t *testing.T) {
 	// Regression test for the leak: fanoutControlEvents was started
 	// with r.Context() as its cancel signal, but hijacked WS conns

@@ -195,15 +195,18 @@ func (s *Server) handleControlWS(w http.ResponseWriter, r *http.Request) {
 
 	// Handshake timeout: if connect doesn't succeed inside the window
 	// the connection is closed so an unauthed client can't camp on the
-	// socket. Goroutine exits cleanly on success, request cancel, or
-	// timeout.
+	// socket. Goroutine exits cleanly on success, handler exit, or
+	// timeout. Watches handlerDone so a pre-connect client disconnect
+	// doesn't leave the goroutine waiting up to 5s on time.After —
+	// r.Context() is not reliable for hijacked WS conns (see
+	// fanoutControlEvents doc block for the same constraint).
 	go func() {
 		select {
 		case <-time.After(controlConnectTimeout):
 			_ = conn.Close()
 		case <-connectDone:
 			return
-		case <-r.Context().Done():
+		case <-handlerDone:
 			return
 		}
 	}()
