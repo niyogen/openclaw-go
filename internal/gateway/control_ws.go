@@ -169,6 +169,17 @@ func (s *Server) handleControlWS(w http.ResponseWriter, r *http.Request) {
 	// signal idempotently.
 	connectDone := make(chan struct{})
 	var connectOnce sync.Once
+	// handlerDone closes when handleControlWS exits (client
+	// disconnects, read error, etc.). The fanout goroutine watches
+	// it explicitly — we can't rely on r.Context() here because
+	// hijacked WebSocket connections detach from the http server's
+	// context lifecycle (the server has no visibility into the conn
+	// after upgrade, so r.Context() is not guaranteed to cancel
+	// when the handler returns). Without this signal, every WS
+	// session that ends would leak a goroutine holding a bus
+	// subscription.
+	handlerDone := make(chan struct{})
+	defer close(handlerDone)
 	signalConnected := func() {
 		connectOnce.Do(func() {
 			connected.Store(true)
@@ -178,7 +189,7 @@ func (s *Server) handleControlWS(w http.ResponseWriter, r *http.Request) {
 			// pipes these into its projection store, which the browser
 			// SSE channel replays — that's how the UI knows when an
 			// assistant reply has arrived without polling.
-			go s.fanoutControlEvents(r.Context(), &eventSeq, writeFrame)
+			go s.fanoutControlEvents(handlerDone, &eventSeq, writeFrame)
 		})
 	}
 

@@ -842,12 +842,18 @@ func handleExecApprovalResolve(s *Server, ctx context.Context, params json.RawMe
 // That requires a run-tracker in openclaw-go (Phase 4). `presence`
 // is a working approximation today; the page may need a reload to
 // see the very latest assistant reply on tight timing windows.
-func (s *Server) fanoutControlEvents(ctx context.Context, seq *int64, writeFrame func(controlFrame) error) {
+// done is closed when the owning WS handler exits (client
+// disconnect, read error, server shutdown). We use an explicit
+// channel rather than a context because hijacked WebSocket
+// connections detach from net/http's r.Context() — relying on
+// the request context would leak this goroutine on every
+// disconnect.
+func (s *Server) fanoutControlEvents(done <-chan struct{}, seq *int64, writeFrame func(controlFrame) error) {
 	evCh, unsub := s.bus.Subscribe("")
 	defer unsub()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-done:
 			return
 		case ev, ok := <-evCh:
 			if !ok {
