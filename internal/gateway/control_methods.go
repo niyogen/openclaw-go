@@ -44,10 +44,115 @@ type configGetPayload struct {
 	Path   string         `json:"path"`
 }
 
+// redactedMarker is the sentinel value that replaces every secret
+// field in config.get responses. Studio displays it as-is; on a
+// subsequent config.patch, the server detects this marker and
+// preserves the original on-disk value rather than blanking the
+// real secret. Choose a string that's unlikely to collide with
+// real config values.
+const redactedMarker = "___REDACTED___"
+
+// sensitiveFieldNames lists the JSON-field names whose values must
+// never be sent to a /control/ws client unredacted. Names are
+// compared case-insensitively. Each appears at varying depths in
+// our config; the redaction walker recurses, so depth-agnostic.
+var sensitiveFieldNames = map[string]struct{}{
+	"authtoken":     {},
+	"password":      {},
+	"apikey":        {},
+	"bottoken":      {},
+	"appsecret":     {},
+	"token":         {},
+	"accesstoken":   {},
+	"webhooksecret": {},
+	"webhooktoken":  {},
+	"signingsecret": {},
+	"verifytoken":   {},
+	"channelsecret": {},
+	"channeltoken":  {},
+	"clientsecret":  {},
+	"refreshtoken":  {},
+}
+
+// redactSensitive walks a config map and replaces every leaf
+// string under a sensitive key with redactedMarker. Leaves empty
+// strings alone (they're not secrets and replacing empties with the
+// marker would confuse studio's "field is unset" detection).
+// Mutates in place; returns the input for fluent use.
+func redactSensitive(node map[string]any) map[string]any {
+	for k, v := range node {
+		lower := strings.ToLower(k)
+		if _, sensitive := sensitiveFieldNames[lower]; sensitive {
+			if s, ok := v.(string); ok && s != "" {
+				node[k] = redactedMarker
+			}
+			continue
+		}
+		// Recurse for nested objects.
+		if child, ok := v.(map[string]any); ok {
+			redactSensitive(child)
+		}
+		// Arrays: recurse into map elements (e.g. nodes: [{token:...}])
+		if arr, ok := v.([]any); ok {
+			for _, item := range arr {
+				if child, ok := item.(map[string]any); ok {
+					redactSensitive(child)
+				}
+			}
+		}
+	}
+	return node
+}
+
+// unredactSensitive walks a patch map and replaces every
+// redactedMarker value with the corresponding value from current
+// (the on-disk config). Used by config.patch and config.set so
+// studio can submit a partial edit that preserves secrets it never
+// saw. Mutates in place.
+func unredactSensitive(patch, current map[string]any) {
+	for k, v := range patch {
+		lower := strings.ToLower(k)
+		if _, sensitive := sensitiveFieldNames[lower]; sensitive {
+			if s, ok := v.(string); ok && s == redactedMarker {
+				if curVal, ok := current[k]; ok {
+					patch[k] = curVal
+				}
+			}
+			continue
+		}
+		// Recurse — but only when the patch and current both have a
+		// matching nested object at this key. If patch is adding a
+		// brand new subtree, there's nothing to merge against.
+		if patchChild, ok := v.(map[string]any); ok {
+			if currentChild, ok := current[k].(map[string]any); ok {
+				unredactSensitive(patchChild, currentChild)
+			}
+		}
+		if patchArr, ok := v.([]any); ok {
+			currentArr, _ := current[k].([]any)
+			for i, item := range patchArr {
+				patchChild, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				if i >= len(currentArr) {
+					continue
+				}
+				currentChild, ok := currentArr[i].(map[string]any)
+				if !ok {
+					continue
+				}
+				unredactSensitive(patchChild, currentChild)
+			}
+		}
+	}
+}
+
 // loadConfigForControl reads the config file at the resolved path
 // (OPENCLAW_CONFIG_PATH override → ~/.openclaw-go/openclaw.json),
-// parses it as a generic JSON object, and computes a stable hash.
-// Returns the upstream-shape payload.
+// parses it as a generic JSON object, redacts secret fields, and
+// computes a stable hash over the ORIGINAL on-disk bytes (not the
+// redacted version) so config.patch round-trips work.
 //
 // Two failure modes:
 //   - file does not exist → {config:{}, hash:"", exists:false, path}.
@@ -57,6 +162,14 @@ type configGetPayload struct {
 //     so studio surfaces a clear "config file is broken" message
 //     rather than papering over it with an empty config.
 func loadConfigForControl() (configGetPayload, *rpcError) {
+	return loadConfigForControlImpl(true)
+}
+
+// loadConfigForControlImpl is the parameterized form. redact=false
+// is used internally by config.patch/set when they need the real
+// on-disk values to merge against. External callers should always
+// use loadConfigForControl (redacting form).
+func loadConfigForControlImpl(redact bool) (configGetPayload, *rpcError) {
 	path, err := config.DefaultPath()
 	if err != nil {
 		return configGetPayload{}, &rpcError{Code: -32000, Message: "resolve config path: " + err.Error()}
@@ -77,13 +190,18 @@ func loadConfigForControl() (configGetPayload, *rpcError) {
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return configGetPayload{}, &rpcError{Code: -32603, Message: "parse config: " + err.Error()}
 	}
-	// Hash the file bytes (not re-encoded JSON) so the hash matches
-	// what's actually on disk byte-for-byte. studio's config.patch
-	// flow round-trips this hash; matching disk bytes is the most
-	// defensible invariant.
+	// Hash the original file bytes (not re-encoded JSON) so the
+	// hash matches what's actually on disk byte-for-byte. Studio's
+	// config.patch flow round-trips this hash; matching disk bytes
+	// is the most defensible invariant — and it works correctly
+	// even when we return a redacted version of the parsed map.
 	sum := sha256.Sum256(raw)
+	cfg := parsed
+	if redact {
+		cfg = redactSensitive(parsed)
+	}
 	return configGetPayload{
-		Config: parsed,
+		Config: cfg,
 		Hash:   hex.EncodeToString(sum[:]),
 		Exists: true,
 		Path:   path,
@@ -120,15 +238,15 @@ func handleConfigPatch(_ *Server, ctx context.Context, params json.RawMessage) (
 	if strings.TrimSpace(p.Raw) == "" {
 		return nil, &rpcError{Code: -32602, Message: "config.patch: raw is required"}
 	}
-	// Validate the supplied raw is parseable before touching disk.
-	var verify map[string]any
-	if err := json.Unmarshal([]byte(p.Raw), &verify); err != nil {
+	// Parse the supplied raw — we'll merge un-redact values into it
+	// below before writing.
+	var patchMap map[string]any
+	if err := json.Unmarshal([]byte(p.Raw), &patchMap); err != nil {
 		return nil, &rpcError{Code: -32602, Message: "config.patch: raw is not valid JSON: " + err.Error()}
 	}
-	// Optimistic-concurrency check: only enforce baseHash when the
-	// file already exists. First-write case (file missing) is allowed
-	// without a hash so studio's onboarding path doesn't get stuck.
-	current, rpcErr := loadConfigForControl()
+	// Optimistic-concurrency check + secret un-redaction need the
+	// REAL on-disk config, not the redacted view.
+	current, rpcErr := loadConfigForControlImpl(false)
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
@@ -140,14 +258,21 @@ func handleConfigPatch(_ *Server, ctx context.Context, params json.RawMessage) (
 		if want != current.Hash {
 			return nil, &rpcError{Code: -32001, Message: "config.patch: config changed since last load; re-run config.get"}
 		}
+		// Replace any redacted markers studio sent with the real
+		// values from disk. studio never sees the real secrets so
+		// this is how it preserves them across edits.
+		unredactSensitive(patchMap, current.Config)
+	}
+	// Re-encode the merged result. This is the canonical disk form.
+	out, err := json.MarshalIndent(patchMap, "", "  ")
+	if err != nil {
+		return nil, &rpcError{Code: -32603, Message: "config.patch: re-encode: " + err.Error()}
 	}
 	// Write atomically at 0o600 (config may carry secrets).
-	if err := fileutil.WriteFile(current.Path, []byte(p.Raw), 0o600); err != nil {
+	if err := fileutil.WriteFile(current.Path, out, 0o600); err != nil {
 		return nil, &rpcError{Code: -32000, Message: "write config: " + err.Error()}
 	}
-	// Return the fresh hash so the caller can chain patches without
-	// re-reading.
-	sum := sha256.Sum256([]byte(p.Raw))
+	sum := sha256.Sum256(out)
 	return map[string]any{
 		"ok":   true,
 		"hash": hex.EncodeToString(sum[:]),
@@ -159,6 +284,8 @@ func handleConfigPatch(_ *Server, ctx context.Context, params json.RawMessage) (
 // check — studio's gateway-permissions flow calls config.set when it
 // intends a full overwrite without coordinating with concurrent
 // editors. Same param shape (`raw`) but baseHash is ignored.
+// Still does redacted-marker → real-value un-redaction since studio
+// never sees the real secrets.
 func handleConfigSet(_ *Server, ctx context.Context, params json.RawMessage) (any, *rpcError) {
 	_ = ctx
 	var p configPatchParams
@@ -168,18 +295,28 @@ func handleConfigSet(_ *Server, ctx context.Context, params json.RawMessage) (an
 	if strings.TrimSpace(p.Raw) == "" {
 		return nil, &rpcError{Code: -32602, Message: "config.set: raw is required"}
 	}
-	var verify map[string]any
-	if err := json.Unmarshal([]byte(p.Raw), &verify); err != nil {
+	var patchMap map[string]any
+	if err := json.Unmarshal([]byte(p.Raw), &patchMap); err != nil {
 		return nil, &rpcError{Code: -32602, Message: "config.set: raw is not valid JSON: " + err.Error()}
 	}
-	path, err := config.DefaultPath()
-	if err != nil {
-		return nil, &rpcError{Code: -32000, Message: "resolve config path: " + err.Error()}
+	// Read current (un-redacted) config so we can replace any
+	// redacted markers studio submits.
+	current, rpcErr := loadConfigForControlImpl(false)
+	if rpcErr == nil && current.Exists {
+		unredactSensitive(patchMap, current.Config)
 	}
-	if err := fileutil.WriteFile(path, []byte(p.Raw), 0o600); err != nil {
+	out, err := json.MarshalIndent(patchMap, "", "  ")
+	if err != nil {
+		return nil, &rpcError{Code: -32603, Message: "config.set: re-encode: " + err.Error()}
+	}
+	path, derr := config.DefaultPath()
+	if derr != nil {
+		return nil, &rpcError{Code: -32000, Message: "resolve config path: " + derr.Error()}
+	}
+	if err := fileutil.WriteFile(path, out, 0o600); err != nil {
 		return nil, &rpcError{Code: -32000, Message: "write config: " + err.Error()}
 	}
-	sum := sha256.Sum256([]byte(p.Raw))
+	sum := sha256.Sum256(out)
 	return map[string]any{
 		"ok":   true,
 		"hash": hex.EncodeToString(sum[:]),

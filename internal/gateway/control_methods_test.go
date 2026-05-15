@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -160,10 +161,129 @@ func TestControlWSConfigPatchEnforcesBaseHash(t *testing.T) {
 	if good.OK == nil || !*good.OK {
 		t.Fatalf("expected right-hash patch to succeed, got %+v", good.Error)
 	}
-	// File should now contain the new content.
+	// File should now contain the new content (semantic compare;
+	// the patch handler re-encodes with indentation now that it
+	// has to perform secret un-redaction).
 	raw, _ := os.ReadFile(cfgPath)
-	if string(raw) != `{"version":2}` {
-		t.Errorf("disk content not updated, got %q", string(raw))
+	var disk map[string]any
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		t.Fatalf("parse disk: %v (raw=%q)", err, string(raw))
+	}
+	if disk["version"].(float64) != 2 {
+		t.Errorf("disk version=%v, want 2", disk["version"])
+	}
+}
+
+func TestControlWSConfigGetRedactsSecrets(t *testing.T) {
+	// config.get must replace every sensitive field value with
+	// redactedMarker so a /control/ws client never sees real
+	// secrets. Tests known-sensitive fields at top level and
+	// nested.
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "openclaw.json")
+	content := `{
+  "gateway": { "authToken": "TOP-SECRET-TOKEN", "host": "127.0.0.1" },
+  "providers": {
+    "openai":    { "apiKey": "sk-real-openai", "model": "gpt-4o-mini" },
+    "anthropic": { "apiKey": "sk-real-anth", "model": "claude" }
+  },
+  "channels": {
+    "telegram":  { "botToken": "tg-real", "chatId": "123" },
+    "whatsapp":  { "appSecret": "wa-secret", "accessToken": "wa-tok" },
+    "slack":     { "signingSecret": "slack-sig", "botToken": "slack-bot" }
+  }
+}`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCLAW_CONFIG_PATH", cfgPath)
+
+	call, _ := newCtlForMethod(t)
+	f := call("c1", "config.get", map[string]any{})
+	if f.OK == nil || !*f.OK {
+		t.Fatalf("config.get failed: %+v", f.Error)
+	}
+	cfg, _ := f.Payload.(map[string]any)["config"].(map[string]any)
+	gw, _ := cfg["gateway"].(map[string]any)
+	if gw["authToken"] != redactedMarker {
+		t.Errorf("gateway.authToken not redacted, got %q", gw["authToken"])
+	}
+	if gw["host"] != "127.0.0.1" {
+		t.Errorf("non-sensitive gateway.host should pass through, got %v", gw["host"])
+	}
+	prov, _ := cfg["providers"].(map[string]any)
+	openai, _ := prov["openai"].(map[string]any)
+	if openai["apiKey"] != redactedMarker {
+		t.Errorf("providers.openai.apiKey not redacted, got %q", openai["apiKey"])
+	}
+	if openai["model"] != "gpt-4o-mini" {
+		t.Errorf("non-sensitive openai.model should pass through, got %v", openai["model"])
+	}
+	channels, _ := cfg["channels"].(map[string]any)
+	tg, _ := channels["telegram"].(map[string]any)
+	if tg["botToken"] != redactedMarker {
+		t.Errorf("telegram.botToken not redacted, got %q", tg["botToken"])
+	}
+	if tg["chatId"] != "123" {
+		t.Errorf("telegram.chatId should pass through, got %v", tg["chatId"])
+	}
+}
+
+func TestControlWSConfigPatchUnredactsMarkerPreservesSecrets(t *testing.T) {
+	// Critical round-trip: studio reads config.get (sees redacted
+	// markers), submits config.patch with markers still in place.
+	// Server must replace markers with the REAL on-disk values so
+	// secrets aren't blanked out by a save.
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "openclaw.json")
+	initial := `{
+  "gateway": { "authToken": "REAL-AUTH-TOKEN", "host": "127.0.0.1" },
+  "providers": { "openai": { "apiKey": "REAL-OPENAI-KEY", "model": "gpt-4o-mini" } }
+}`
+	if err := os.WriteFile(cfgPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCLAW_CONFIG_PATH", cfgPath)
+
+	call, _ := newCtlForMethod(t)
+	// Read current hash.
+	getRes := call("c1", "config.get", map[string]any{})
+	currentHash := getRes.Payload.(map[string]any)["hash"].(string)
+
+	// Submit a patch with the redacted marker still in place AND
+	// a real change to a non-sensitive field.
+	patchRaw := fmt.Sprintf(`{
+  "gateway": { "authToken": %q, "host": "0.0.0.0" },
+  "providers": { "openai": { "apiKey": %q, "model": "gpt-5" } }
+}`, redactedMarker, redactedMarker)
+
+	patchRes := call("p1", "config.patch", map[string]any{
+		"raw":      patchRaw,
+		"baseHash": currentHash,
+	})
+	if patchRes.OK == nil || !*patchRes.OK {
+		t.Fatalf("config.patch failed: %+v", patchRes.Error)
+	}
+
+	// Read what's on disk now (NOT via the redacting API).
+	raw, _ := os.ReadFile(cfgPath)
+	var onDisk map[string]any
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatalf("parse on-disk: %v", err)
+	}
+	gw, _ := onDisk["gateway"].(map[string]any)
+	if gw["authToken"] != "REAL-AUTH-TOKEN" {
+		t.Errorf("authToken was overwritten with redacted marker — got %q, want preserved real value", gw["authToken"])
+	}
+	if gw["host"] != "0.0.0.0" {
+		t.Errorf("non-sensitive change should apply, got host=%v", gw["host"])
+	}
+	openai, _ := onDisk["providers"].(map[string]any)["openai"].(map[string]any)
+	if openai["apiKey"] != "REAL-OPENAI-KEY" {
+		t.Errorf("openai.apiKey overwritten with marker — got %q, want preserved real value", openai["apiKey"])
+	}
+	if openai["model"] != "gpt-5" {
+		t.Errorf("non-sensitive openai.model change should apply, got %v", openai["model"])
 	}
 }
 
@@ -525,8 +645,12 @@ func TestControlWSConfigSetWritesDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read written file: %v", err)
 	}
-	if string(raw) != `{"version":42}` {
-		t.Errorf("disk content wrong: %q", string(raw))
+	var disk map[string]any
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		t.Fatalf("parse disk: %v (raw=%q)", err, string(raw))
+	}
+	if disk["version"].(float64) != 42 {
+		t.Errorf("disk version=%v, want 42", disk["version"])
 	}
 	// Returns hash + path so callers can chain.
 	p, _ := f.Payload.(map[string]any)
